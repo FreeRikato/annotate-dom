@@ -1,4 +1,5 @@
 import { type WireBatch, writeBatch } from './batch'
+import { handleMcp } from './mcp'
 import { cwdOfListeningPort, findProjectRoot } from './root'
 
 export type DaemonOptions = {
@@ -71,6 +72,7 @@ export async function createDaemon({ port, home, extensionId, cwdOfPort = cwdOfL
         if (req.headers.get('origin') !== allowedOrigin) return new Response('forbidden', { status: 403 })
         return srv.upgrade(req) ? undefined : new Response('upgrade failed', { status: 400 })
       }
+      if (pathname === '/mcp') return handleMcp({ req, home, port: srv.port as number })
       return new Response('not found', { status: 404 })
     },
     websocket: {
