@@ -80,6 +80,30 @@ describe('toMarkdown', () => {
     expect(md).toContain('````html\n<button type="submit">Save</button>\n````')
   })
 
+  it('renders each excerpt as a fenced block under the source', () => {
+    const withExcerpts = toMarkdown({
+      origin: 'http://localhost:3000',
+      createdAt: 0,
+      pages: [{
+        path: '/settings', url: 'http://localhost:3000/settings', viewportFile: null,
+        pins: [{
+          pin: pin('a', '/settings', 'x'),
+          cropFile: null,
+          excerpts: [
+            { file: '/app/components/ui/button.tsx', line: 58, startLine: 56, code: 'a\nb\nc' },
+            { file: '/app/components/item-form.tsx', line: 88, startLine: 88, code: 'd' },
+          ],
+        }],
+      }],
+    })
+    expect(withExcerpts).toContain(
+      '- Source: /app/components/ui/button.tsx:58:5 (`<button>` element)\n' +
+      '- Code around /app/components/ui/button.tsx:58 (lines 56 to 58):\n\n````\na\nb\nc\n````\n' +
+      '- Code around /app/components/item-form.tsx:88 (lines 88 to 88):\n\n````\nd\n````\n',
+    )
+    expect(md).not.toContain('Code around')
+  })
+
   it('has no em dashes', () => {
     expect(md).not.toContain('—')
   })

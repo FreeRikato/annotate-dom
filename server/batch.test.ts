@@ -141,3 +141,33 @@ test('an exclude file without a trailing newline keeps its last line intact', as
   await writeBatch({ root, home, batch: wireBatch() })
   expect((await readFile(join(root, '.git/info/exclude'), 'utf8')).split('\n').filter(Boolean)).toEqual(['*.log', '.annotations/'])
 })
+
+test('each pin gets excerpts read from disk for its element site and project call sites', async () => {
+  await mkdir(join(root, 'src'), { recursive: true })
+  await writeFile(join(root, 'src/Form.tsx'), Array.from({ length: 20 }, (_, i) => `form ${i + 1}`).join('\n'))
+  const page = join(root, 'src/Page.tsx')
+  await writeFile(page, Array.from({ length: 20 }, (_, i) => `page ${i + 1}`).join('\n'))
+  const lib = join(root, 'node_modules/ui/index.js')
+  await mkdir(join(lib, '..'), { recursive: true })
+  await writeFile(lib, 'lib')
+  const batch = wireBatch({
+    pins: wireBatch().pins.map(pin => ({
+      ...pin,
+      inspection: { ...inspection, react: { elementStack: 'x', owners: [{ name: 'Form', env: 'client', stack: 'x', props: null, state: null }] } },
+      callSites: [
+        { name: 'Form', loc: { file: page, line: 9, column: 1 } },
+        { name: 'Ui', loc: { file: lib, line: 1, column: 1 } },
+      ],
+    })),
+  })
+  const { folder } = await writeBatch({ root, home, batch })
+  const dirPath = join(root, '.annotations', folder)
+  const stored: StoredBatch = JSON.parse(await readFile(join(dirPath, 'batch.json'), 'utf8'))
+  expect(stored.pins[0]?.excerpts).toEqual([
+    { file: join(root, 'src/Form.tsx'), line: 4, startLine: 1, code: ['form 1', 'form 2', 'form 3', 'form 4', 'form 5', 'form 6', 'form 7', 'form 8', 'form 9'].join('\n') },
+    { file: page, line: 9, startLine: 4, code: Array.from({ length: 11 }, (_, i) => `page ${i + 4}`).join('\n') },
+  ])
+  const markdown = await readFile(join(dirPath, 'batch.md'), 'utf8')
+  expect(markdown).toContain(`- Code around ${page}:9 (lines 4 to 14):\n\n\`\`\`\`\npage 4\n`)
+  expect(markdown).not.toContain('node_modules/ui')
+})

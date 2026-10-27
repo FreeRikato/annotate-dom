@@ -1,7 +1,8 @@
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
-import { type ExportPage, toMarkdown } from '../src/lib/markdown'
+import { type Excerpt, type ExportPage, toMarkdown } from '../src/lib/markdown'
 import type { CallSite, Pin, SourceLoc } from '../src/lib/types'
+import { readExcerpts } from './excerpt'
 
 export type WirePage = { readonly path: string; readonly url: string; readonly viewport: string | null }
 
@@ -19,7 +20,7 @@ export type StoredRecapture = {
   readonly htmlChanged: boolean
 }
 
-export type Excerpt = { readonly file: string; readonly line: number; readonly startLine: number; readonly code: string }
+export type { Excerpt }
 
 export type StoredPin = Omit<Pin, 'crop'> & {
   readonly n: number
@@ -81,13 +82,15 @@ function absoluteCallSite(root: string, site: CallSite): CallSite {
   return { ...site, loc: absoluteLoc(root, site.loc) }
 }
 
-function storedPin(root: string, { crop: _crop, ...pin }: Pin & { readonly n: number }): StoredPin {
+async function storedPin(root: string, { crop: _crop, ...pin }: Pin & { readonly n: number }): Promise<StoredPin> {
+  const elementSite = absoluteLoc(root, pin.elementSite)
+  const callSites = pin.callSites.map(site => absoluteCallSite(root, site))
   return {
     ...pin,
-    elementSite: absoluteLoc(root, pin.elementSite),
-    callSites: pin.callSites.map(site => absoluteCallSite(root, site)),
+    elementSite,
+    callSites,
     cropFile: `pin-${pin.n}.png`,
-    excerpts: [],
+    excerpts: await readExcerpts({ root, sites: [elementSite, ...callSites.map(site => site.loc)] }),
     status: 'open',
     summary: null,
     resolvedAt: null,
@@ -100,7 +103,7 @@ export function renderStoredMarkdown(batch: StoredBatch): string {
     ...page,
     pins: batch.pins
       .filter(pin => pin.path === page.path)
-      .map(pin => ({ pin: { ...pin, crop: '' }, cropFile: pin.cropFile })),
+      .map(pin => ({ pin: { ...pin, crop: '' }, cropFile: pin.cropFile, excerpts: pin.excerpts })),
   }))
   return toMarkdown({ origin: batch.origin, createdAt: batch.createdAt, pages })
 }
@@ -145,7 +148,7 @@ export async function writeBatch({ root, home, batch }: {
   }))
   const stored: StoredBatch = {
     version: 1, folder, project: root, origin: batch.origin, createdAt: batch.createdAt,
-    pages, pins: batch.pins.map(pin => storedPin(root, pin)),
+    pages, pins: await Promise.all(batch.pins.map(pin => storedPin(root, pin))),
   }
   await Promise.all([
     writeFile(join(dir, 'batch.json'), JSON.stringify(stored, null, 2)),

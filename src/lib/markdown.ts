@@ -1,6 +1,8 @@
 import type { Pin, SourceLoc } from './types'
 
-export type ExportPin = { readonly pin: Pin; readonly cropFile: string | null }
+export type Excerpt = { readonly file: string; readonly line: number; readonly startLine: number; readonly code: string }
+
+export type ExportPin = { readonly pin: Pin; readonly cropFile: string | null; readonly excerpts?: readonly Excerpt[] }
 
 export type ExportPage = {
   readonly path: string
@@ -34,7 +36,7 @@ function stamp(ms: number): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
-function pinSection({ pin, cropFile }: ExportPin, n: number): string[] {
+function pinSection({ pin, cropFile, excerpts = [] }: ExportPin, n: number): string[] {
   const { inspection: ins } = pin
   const owners = ins.react?.owners ?? []
   const lines = [`### ${n}. ${pin.note.split('\n')[0]}`]
@@ -42,6 +44,9 @@ function pinSection({ pin, cropFile }: ExportPin, n: number): string[] {
   lines.push(`- Screenshot: ${cropFile ?? 'not saved'}`)
   if (ins.react) {
     lines.push(`- Source: ${loc(pin.elementSite)} (${code(`<${ins.tag}>`)} element)`)
+    for (const { file, line, startLine, code: text } of excerpts) {
+      lines.push(`- Code around ${file}:${line} (lines ${startLine} to ${startLine + text.split('\n').length - 1}):`, '', '````', text, '````')
+    }
     if (owners.length) {
       lines.push(`- Components: ${owners.map(o => o.name).reverse().join(' > ')}`)
       lines.push('- Call sites (innermost first):')
