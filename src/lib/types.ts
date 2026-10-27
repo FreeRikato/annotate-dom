@@ -15,6 +15,65 @@ export type ReactSnapshot = {
   readonly owners: readonly OwnerSnapshot[]
 }
 
+export type RecordedConsole = { readonly at: number; readonly message: string }
+
+export type RecordedRequest = {
+  readonly at: number
+  readonly method: string
+  readonly url: string
+  readonly status: number | null
+  readonly durationMs: number
+}
+
+export type RecordedEvents = {
+  readonly console: readonly RecordedConsole[]
+  readonly network: readonly RecordedRequest[]
+}
+
+export type ConsoleEvent = { readonly offsetMs: number; readonly message: string }
+
+export type NetworkEvent = Omit<RecordedRequest, 'at'> & { readonly offsetMs: number }
+
+export type QuerySnapshot = {
+  readonly key: string
+  readonly status: string
+  readonly fetchStatus: string
+  readonly dataUpdatedAt: number
+  readonly error: string | null
+  readonly dataShape: string
+}
+
+export type Interaction = {
+  readonly focused: string | null
+  readonly hovered: string | null
+  readonly dialogs: readonly string[]
+  readonly searchParams: readonly { readonly key: string; readonly value: string }[]
+}
+
+export type TokenValue = {
+  readonly prop: string
+  readonly value: string
+  readonly token: string | null
+}
+
+export type DesignTokens = {
+  readonly classes: readonly string[]
+  readonly values: readonly TokenValue[]
+}
+
+export type AxeViolation = {
+  readonly id: string
+  readonly impact: string | null
+  readonly selector: string
+}
+
+export type Accessibility = {
+  readonly role: string | null
+  readonly name: string
+  readonly states: readonly string[]
+  readonly violations: readonly AxeViolation[]
+}
+
 export type Inspection = {
   readonly selector: string
   readonly tag: string
@@ -27,6 +86,13 @@ export type Inspection = {
   readonly ancestors: readonly Ancestor[]
   readonly viewport: { readonly width: number; readonly height: number; readonly dpr: number }
   readonly react: ReactSnapshot | null
+  readonly console?: readonly ConsoleEvent[]
+  readonly network?: readonly NetworkEvent[]
+  readonly queries?: readonly QuerySnapshot[]
+  readonly interaction?: Interaction
+  readonly tokens?: DesignTokens
+  readonly locator?: string | null
+  readonly a11y?: Accessibility
 }
 
 export type SourceLoc = { readonly file: string; readonly line: number; readonly column: number }
@@ -57,3 +123,5 @@ export type Batch = {
 }
 
 export const emptyBatch: Batch = { pins: [], viewports: {} }
+
+export const PROJECT_ROOT_NOT_FOUND = 'project root not found'

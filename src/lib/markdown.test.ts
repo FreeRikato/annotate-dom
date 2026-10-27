@@ -80,6 +80,166 @@ describe('toMarkdown', () => {
     expect(md).toContain('````html\n<button type="submit">Save</button>\n````')
   })
 
+  it('renders each excerpt as a fenced block under the source', () => {
+    const withExcerpts = toMarkdown({
+      origin: 'http://localhost:3000',
+      createdAt: 0,
+      pages: [{
+        path: '/settings', url: 'http://localhost:3000/settings', viewportFile: null,
+        pins: [{
+          pin: pin('a', '/settings', 'x'),
+          cropFile: null,
+          excerpts: [
+            { file: '/app/components/ui/button.tsx', line: 58, startLine: 56, code: 'a\nb\nc' },
+            { file: '/app/components/item-form.tsx', line: 88, startLine: 88, code: 'd' },
+          ],
+        }],
+      }],
+    })
+    expect(withExcerpts).toContain(
+      '- Source: /app/components/ui/button.tsx:58:5 (`<button>` element)\n' +
+      '- Code around /app/components/ui/button.tsx:58 (lines 56 to 58):\n\n````\na\nb\nc\n````\n' +
+      '- Code around /app/components/item-form.tsx:88 (lines 88 to 88):\n\n````\nd\n````\n',
+    )
+    expect(md).not.toContain('Code around')
+  })
+
+  it('lists console errors and failed or slow requests only when present', () => {
+    const recorded = toMarkdown({
+      origin: 'http://localhost:3000',
+      createdAt: 0,
+      pages: [{
+        path: '/settings', url: 'http://localhost:3000/settings', viewportFile: null,
+        pins: [{
+          pin: {
+            ...pin('a', '/settings', 'x'),
+            inspection: {
+              ...inspection,
+              console: [{ offsetMs: -2000, message: 'boom' }],
+              network: [
+                { offsetMs: -2000, method: 'POST', url: 'http://localhost:3000/api/save', status: 500, durationMs: 120 },
+                { offsetMs: -3200, method: 'GET', url: 'http://localhost:3000/slow', status: null, durationMs: 3200 },
+              ],
+            },
+          },
+          cropFile: null,
+        }],
+      }],
+    })
+    expect(recorded).toContain(
+      '- Console errors in the 30 s before the pin:\n  - 2.0 s before: `boom`\n' +
+      '- Failed or slow requests in the 30 s before the pin:\n' +
+      '  - 2.0 s before: POST `http://localhost:3000/api/save` 500 in 120 ms\n' +
+      '  - 3.2 s before: GET `http://localhost:3000/slow` failed in 3200 ms\n',
+    )
+    expect(md).not.toContain('Console errors')
+    expect(md).not.toContain('Failed or slow requests')
+  })
+
+  it('lists queries and interaction state only when present', () => {
+    const withState = toMarkdown({
+      origin: 'http://localhost:3000',
+      createdAt: 0,
+      pages: [{
+        path: '/settings', url: 'http://localhost:3000/settings', viewportFile: null,
+        pins: [{
+          pin: {
+            ...pin('a', '/settings', 'x'),
+            inspection: {
+              ...inspection,
+              queries: [
+                { key: '["user",7]', status: 'success', fetchStatus: 'idle', dataUpdatedAt: new Date(2026, 9, 26, 14, 1).getTime(), error: null, dataShape: 'object{id,name}' },
+                { key: '["todos"]', status: 'error', fetchStatus: 'idle', dataUpdatedAt: 0, error: 'Network down', dataShape: 'undefined' },
+              ],
+              interaction: {
+                focused: '#email',
+                hovered: 'button',
+                dialogs: ['#confirm', '#more'],
+                searchParams: [{ key: 'tab', value: 'stock' }, { key: 'page', value: '2' }],
+              },
+            },
+          },
+          cropFile: null,
+        }],
+      }],
+    })
+    expect(withState).toContain(
+      '- Queries:\n' +
+      '  - `["user",7]`: success, idle, updated 2026-10-26 14:01, data object{id,name}\n' +
+      '  - `["todos"]`: error, idle, never updated, data undefined, error `Network down`\n' +
+      '- Focused: `#email`\n' +
+      '- Hovered: `button`\n' +
+      '- Open dialogs: `#confirm`, `#more`\n' +
+      '- Search params: tab=stock, page=2\n',
+    )
+    const empty = toMarkdown({
+      origin: 'http://localhost:3000',
+      createdAt: 0,
+      pages: [{
+        path: '/settings', url: 'http://localhost:3000/settings', viewportFile: null,
+        pins: [{
+          pin: { ...pin('a', '/settings', 'x'), inspection: { ...inspection, queries: [], interaction: { focused: null, hovered: null, dialogs: [], searchParams: [] } } },
+          cropFile: null,
+        }],
+      }],
+    })
+    for (const text of [md, empty]) {
+      expect(text).not.toContain('Queries')
+      expect(text).not.toContain('Focused')
+      expect(text).not.toContain('Hovered')
+      expect(text).not.toContain('Open dialogs')
+      expect(text).not.toContain('Search params')
+    }
+  })
+
+  it('lists the locator, classes and token matches next to the selector, only when present', () => {
+    const render = (extra: Partial<Inspection>) => toMarkdown({
+      origin: 'http://localhost:3000',
+      createdAt: 0,
+      pages: [{
+        path: '/settings', url: 'http://localhost:3000/settings', viewportFile: null,
+        pins: [{ pin: { ...pin('a', '/settings', 'x'), inspection: { ...inspection, ...extra } }, cropFile: null }],
+      }],
+    })
+    const withTokens = render({
+      locator: "getByRole('button', { name: 'Save' })",
+      tokens: {
+        classes: ['bg-background', 'p-4'],
+        values: [
+          { prop: 'background-color', value: 'rgb(255, 255, 255)', token: 'var(--background)' },
+          { prop: 'color', value: 'rgb(9, 9, 9)', token: null },
+        ],
+      },
+    })
+    expect(withTokens).toContain(
+      '- Selector: `form > button[type="submit"]`\n' +
+      "- Locator: `getByRole('button', { name: 'Save' })`\n" +
+      '- Classes: `bg-background p-4`\n' +
+      '- Tokens: background-color: rgb(255, 255, 255) = var(--background); color: rgb(9, 9, 9) (no token)\n',
+    )
+    const withA11y = render({
+      a11y: {
+        role: 'button',
+        name: 'Save',
+        states: ['disabled'],
+        violations: [{ id: 'color-contrast', impact: 'serious', selector: 'form > button' }],
+      },
+    })
+    expect(withA11y).toContain(
+      '- Accessibility: role `button`, name `Save`, states `disabled`\n' +
+      '- Axe violations: `color-contrast` (serious) at `form > button`\n',
+    )
+    const bare = render({ a11y: { role: null, name: '', states: [], violations: [] } })
+    expect(bare).toContain('- Accessibility: no role, no name\n')
+    expect(bare).not.toContain('Axe violations')
+    for (const text of [md, render({ locator: null, tokens: { classes: [], values: [] } })]) {
+      expect(text).not.toContain('Accessibility')
+      expect(text).not.toContain('Locator')
+      expect(text).not.toContain('Classes')
+      expect(text).not.toContain('Tokens')
+    }
+  })
+
   it('has no em dashes', () => {
     expect(md).not.toContain('—')
   })

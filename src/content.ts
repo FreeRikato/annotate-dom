@@ -1,9 +1,11 @@
-import { MARKER_ATTR, type Reply, type Request, type Responses } from './lib/messages'
+import { sendLabel } from './lib/daemon'
+import { FOCUSED_ATTR, HOVERED_ATTR, MARKER_ATTR, type Reply, type Request, type Responses } from './lib/messages'
 import { createResolver } from './lib/resolve'
 import { callSiteFrame } from './lib/stack'
-import { emptyBatch, type Batch, type Box, type CallSite, type Pin } from './lib/types'
+import { emptyBatch, PROJECT_ROOT_NOT_FOUND, type Batch, type Box, type CallSite, type Pin } from './lib/types'
 
 const GLOBAL_KEY = '__annotateDomToggle'
+const DAEMON_POLL_MS = 2000
 
 async function call<K extends Request['kind']>(req: Extract<Request, { kind: K }>): Promise<Responses[K]> {
   const reply: Reply<K> = await chrome.runtime.sendMessage(req)
@@ -116,8 +118,10 @@ function start(): () => void {
   let visible = true
   let picking = true
   let busy = false
+  let connected = false
   let target: Element | null = null
   let editing: Element | null = null
+  let pinContext: { readonly focused: Element | null; readonly hovered: Element | null } = { focused: null, hovered: null }
   let lastPath = location.pathname
   let toastTimer = 0
 
@@ -133,6 +137,7 @@ function start(): () => void {
     list.replaceChildren()
     title.textContent = `annotate-dom (${batch.pins.length})`
     pickBtn.classList.toggle('on', picking)
+    copyBtn.textContent = sendLabel(connected)
     copyBtn.disabled = busy || batch.pins.length === 0
     if (!batch.pins.length) {
       list.append(h('div', { className: 'empty', text: picking ? 'Click an element to annotate it. Esc stops picking.' : 'No annotations yet. Press Pick.' }))
@@ -191,8 +196,16 @@ function start(): () => void {
     hlLabel.textContent = `${el.tagName.toLowerCase()}${id}${cls}  ${Math.round(r.width)}x${Math.round(r.height)}`
   }
 
+  function appElement(candidate: Element | null | undefined): Element | null {
+    return candidate && candidate !== document.body && candidate !== document.documentElement && candidate !== host ? candidate : null
+  }
+
   function openEditor(el: Element) {
     editing = el
+    pinContext = {
+      focused: appElement(document.activeElement),
+      hovered: appElement(Array.from(document.querySelectorAll(':hover')).filter(node => node !== host).at(-1)),
+    }
     showHighlight(el)
     const r = el.getBoundingClientRect()
     const left = Math.min(Math.max(8, r.left), innerWidth - 316)
@@ -215,11 +228,16 @@ function start(): () => void {
     const id = crypto.randomUUID()
     try {
       el.setAttribute(MARKER_ATTR, id)
+      const { focused, hovered } = pinContext
+      focused?.setAttribute(FOCUSED_ATTR, '')
+      hovered?.setAttribute(HOVERED_ATTR, '')
       let inspection
       try {
         inspection = await call({ kind: 'inspect', marker: id })
       } finally {
         el.removeAttribute(MARKER_ATTR)
+        focused?.removeAttribute(FOCUSED_ATTR)
+        hovered?.removeAttribute(HOVERED_ATTR)
       }
       if (!inspection) throw new Error('Element is gone')
       const owners = inspection.react?.owners ?? []
@@ -330,7 +348,32 @@ function start(): () => void {
     renderList()
   })
   closeBtn.addEventListener('click', () => setVisible(false))
-  copyBtn.addEventListener('click', async () => {
+  async function sendToDaemon() {
+    busy = true
+    renderList()
+    try {
+      const { count, folder, prompt } = await call({ kind: 'send', origin: location.origin })
+      batch = emptyBatch
+      try {
+        await navigator.clipboard.writeText(prompt)
+        fallback.style.display = 'none'
+      } catch {
+        fallbackText.value = prompt
+        fallback.style.display = 'block'
+        fallbackText.select()
+      }
+      setToast(`Sent ${count} annotation${count === 1 ? '' : 's'} to .annotations/${folder}/`, false)
+    } catch (err: unknown) {
+      busy = false
+      if (err instanceof Error && err.message === PROJECT_ROOT_NOT_FOUND) return copyAll()
+      setToast(`Send failed: ${err instanceof Error ? err.message : String(err)}`, false)
+    } finally {
+      busy = false
+      renderList()
+    }
+  }
+
+  async function copyAll() {
     busy = true
     renderList()
     try {
@@ -352,7 +395,9 @@ function start(): () => void {
       busy = false
       renderList()
     }
-  })
+  }
+
+  copyBtn.addEventListener('click', () => (connected ? sendToDaemon() : copyAll()))
   undoBtn.addEventListener('click', async () => {
     batch = await call({ kind: 'undo' })
     toast.style.display = 'none'
@@ -389,6 +434,16 @@ function start(): () => void {
     if (!next) closeEditor()
     renderList()
   }
+
+  function refreshDaemonStatus() {
+    call({ kind: 'daemon-status' }).then(status => {
+      if (status.connected === connected) return
+      connected = status.connected
+      renderList()
+    }, () => undefined)
+  }
+  refreshDaemonStatus()
+  window.setInterval(refreshDaemonStatus, DAEMON_POLL_MS)
 
   call({ kind: 'get-batch' }).then(b => {
     batch = b

@@ -40,6 +40,23 @@ describe('createResolver', () => {
     expect(calls).toHaveLength(2)
   })
 
+  it('resolves sources of an inline data URL map against the module URL', async () => {
+    const viteOrigin = 'http://localhost:5199'
+    const moduleUrl = `${viteOrigin}/src/App.tsx`
+    const inlineMap = btoa(JSON.stringify({ version: 3, sources: ['App.tsx'], names: [], mappings: ';AACA' }))
+    const dataUrl = `data:application/json;base64,${inlineMap}`
+    const { fetcher } = routes({
+      [moduleUrl]: () => new Response(`line1\nline2\n//# sourceMappingURL=${dataUrl}`),
+      [dataUrl]: () => new Response(atob(inlineMap)),
+    })
+    const resolver = createResolver({ pageOrigin: viteOrigin, fetcher })
+    expect(await resolver.resolve({ fn: 'App', file: moduleUrl, line: 2, column: 1 })).toEqual({
+      file: 'src/App.tsx',
+      line: 2,
+      column: 1,
+    })
+  })
+
   it('returns null when the chunk has no source map', async () => {
     const { fetcher } = routes({ [CHUNK]: () => new Response('no map here') })
     const resolver = createResolver({ pageOrigin: ORIGIN, fetcher })

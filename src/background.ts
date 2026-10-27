@@ -1,7 +1,10 @@
-import { inspectElement } from './inspect'
+import { axeViolations, inspectElement } from './inspect'
+import {
+  clearRecaptureTarget, createDaemonClient, createRecaptureHandler, DAEMON_URL, markRecaptureTarget, TARGET_ATTR, waitForQuiet, webSocketFactory,
+} from './lib/daemon'
 import { toMarkdown, type ExportPage } from './lib/markdown'
 import { assertNever, hasRequestKind, type Reply, type Request, type Responses } from './lib/messages'
-import { emptyBatch, type Batch, type Box, type ViewportShot } from './lib/types'
+import { emptyBatch, type Batch, type Box, type Inspection, type ViewportShot } from './lib/types'
 
 const batchKey = (tabId: number) => `batch:${tabId}`
 const undoKey = (tabId: number) => `undo:${tabId}`
@@ -158,20 +161,128 @@ async function exportBatch({ tabId, origin }: { readonly tabId: number; readonly
   return { markdown, count: n }
 }
 
+async function sendBatch({ tabId, origin }: { readonly tabId: number; readonly origin: string }): Promise<Responses['send']> {
+  const batch = (await read(batchKey(tabId))) ?? emptyBatch
+  const pages = []
+  const pins = []
+  for (const path of new Set(batch.pins.map(p => p.path))) {
+    const numbers = new Map<string, number>()
+    for (const pin of batch.pins.filter(p => p.path === path)) {
+      numbers.set(pin.id, pins.length + 1)
+      pins.push({ ...pin, n: pins.length + 1 })
+    }
+    const shot = batch.viewports[path]
+    pages.push({
+      path,
+      url: batch.pins.find(p => p.path === path)?.url ?? origin + path,
+      viewport: shot ? await numberedViewport({ shot, numbers }) : null,
+    })
+  }
+  const saved = await daemon.send({ origin, createdAt: Date.now(), pages, pins })
+  await writeBatch(tabId, emptyBatch)
+  return { count: pins.length, folder: saved.folder, prompt: saved.prompt }
+}
+
+async function inspectTab({ tabId, frameId, marker }: { readonly tabId: number; readonly frameId: number; readonly marker: string }): Promise<Inspection | null> {
+  const target = { tabId, frameIds: [frameId] }
+  const [axePresent] = await chrome.scripting.executeScript({
+    target,
+    world: 'MAIN',
+    func: () => Reflect.has(window, 'axe'),
+  })
+  if (!axePresent?.result) await chrome.scripting.executeScript({ target, world: 'MAIN', files: ['axe.min.js'] })
+  const [result] = await chrome.scripting.executeScript({
+    target,
+    world: 'MAIN',
+    func: inspectElement,
+    args: [marker],
+  })
+  const inspection = result?.result
+  if (!inspection?.a11y) return inspection ?? null
+  const [found] = await chrome.scripting.executeScript({
+    target,
+    world: 'MAIN',
+    func: axeViolations,
+    args: [marker],
+  })
+  return { ...inspection, a11y: { ...inspection.a11y, violations: found?.result ?? [] } }
+}
+
+const QUIET_MS = 1_000
+const SETTLE_CAP_MS = 10_000
+const CDP_VERSION = '1.3'
+
+function onTabLoaded(tabId: number): Promise<void> {
+  return new Promise(resolve => {
+    const listener = (id: number, info: { status?: string }) => {
+      if (id !== tabId || info.status !== 'complete') return
+      chrome.tabs.onUpdated.removeListener(listener)
+      resolve()
+    }
+    chrome.tabs.onUpdated.addListener(listener)
+  })
+}
+
+async function captureTab(tabId: number): Promise<string> {
+  const target = { tabId }
+  await chrome.debugger.attach(target, CDP_VERSION)
+  try {
+    const shot: unknown = await chrome.debugger.sendCommand(target, 'Page.captureScreenshot', { format: 'png' })
+    if (typeof shot !== 'object' || shot === null || !('data' in shot) || typeof shot.data !== 'string') throw new Error('Screenshot failed')
+    return `data:image/png;base64,${shot.data}`
+  } finally {
+    await chrome.debugger.detach(target).catch(() => undefined)
+  }
+}
+
+const recapture = createRecaptureHandler({
+  findTab: async url => (await chrome.tabs.query({})).find(tab => tab.url === url)?.id ?? null,
+  openTab: async url => {
+    const tab = await chrome.tabs.create({ url, active: false })
+    if (tab.id === undefined) throw new Error('Could not open a tab')
+    await onTabLoaded(tab.id)
+    return tab.id
+  },
+  closeTab: tabId => chrome.tabs.remove(tabId),
+  settle: async tabId => void await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'MAIN',
+    func: waitForQuiet,
+    args: [{ quietMs: QUIET_MS, capMs: SETTLE_CAP_MS }],
+  }),
+  mark: async ({ tabId, selector, locator, marker }) => {
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: markRecaptureTarget,
+      args: [{ selector, locator, marker, attr: TARGET_ATTR }],
+    })
+    return result?.result ?? null
+  },
+  unmark: async ({ tabId, marker }) => void await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'MAIN',
+    func: clearRecaptureTarget,
+    args: [{ marker, attr: TARGET_ATTR }],
+  }),
+  inspect: ({ tabId, marker }) => inspectTab({ tabId, frameId: 0, marker }),
+  screenshot: captureTab,
+  crop: async ({ shot, box, viewportWidth }) => {
+    const image = await decode(shot)
+    return crop({ image, rect: box, scale: image.width / viewportWidth })
+  },
+})
+
+const daemon = createDaemonClient({ createSocket: webSocketFactory(DAEMON_URL), onRecapture: recapture })
+daemon.start()
+
 async function handle(req: Request, sender: chrome.runtime.MessageSender): Promise<Responses[Request['kind']]> {
   const tab = sender.tab
   if (tab?.id === undefined) throw new Error('No sender tab')
   const tabId = tab.id
   switch (req.kind) {
-    case 'inspect': {
-      const [result] = await chrome.scripting.executeScript({
-        target: { tabId, frameIds: [sender.frameId ?? 0] },
-        world: 'MAIN',
-        func: inspectElement,
-        args: [req.marker],
-      })
-      return result?.result ?? null
-    }
+    case 'inspect':
+      return inspectTab({ tabId, frameId: sender.frameId ?? 0, marker: req.marker })
     case 'capture': {
       const viewport = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' })
       const image = await decode(viewport)
@@ -200,6 +311,10 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
       })
     case 'export':
       return withTab(tabId, () => exportBatch({ tabId, origin: req.origin }))
+    case 'daemon-status':
+      return { connected: daemon.isConnected() }
+    case 'send':
+      return withTab(tabId, () => sendBatch({ tabId, origin: req.origin }))
     case 'undo':
       return withTab(tabId, async () => {
         const previous = await read(undoKey(tabId))
