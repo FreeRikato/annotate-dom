@@ -22,6 +22,7 @@
   "dependencies": {
     "@jridgewell/trace-mapping": "^0.3.31",
     "@modelcontextprotocol/sdk": "^1.32.2",
+    "axe-core": "^4.14.0",
     "zod": "^4.6.7"
   }
 }

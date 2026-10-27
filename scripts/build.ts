@@ -1,5 +1,5 @@
 import { build } from 'vite'
-import { readFile, writeFile } from 'node:fs/promises'
+import { copyFile, readFile, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 
 const test = process.argv.includes('--test')
@@ -33,6 +33,8 @@ await build({
     lib: { entry: resolve(import.meta.dirname, '../src/recorder.ts'), formats: ['iife'], name: 'annotateDomRecorder', fileName: () => 'recorder.js' },
   },
 })
+
+await copyFile(resolve(import.meta.dirname, '../node_modules/axe-core/axe.min.js'), resolve(outDir, 'axe.min.js'))
 
 if (test) {
   const path = resolve(outDir, 'manifest.json')

@@ -1,4 +1,4 @@
-import { inspectElement } from './inspect'
+import { axeViolations, inspectElement } from './inspect'
 import { createDaemonClient, DAEMON_URL, webSocketFactory } from './lib/daemon'
 import { toMarkdown, type ExportPage } from './lib/markdown'
 import { assertNever, hasRequestKind, type Reply, type Request, type Responses } from './lib/messages'
@@ -190,13 +190,28 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
   const tabId = tab.id
   switch (req.kind) {
     case 'inspect': {
+      const target = { tabId, frameIds: [sender.frameId ?? 0] }
+      const [axePresent] = await chrome.scripting.executeScript({
+        target,
+        world: 'MAIN',
+        func: () => Reflect.has(window, 'axe'),
+      })
+      if (!axePresent?.result) await chrome.scripting.executeScript({ target, world: 'MAIN', files: ['axe.min.js'] })
       const [result] = await chrome.scripting.executeScript({
-        target: { tabId, frameIds: [sender.frameId ?? 0] },
+        target,
         world: 'MAIN',
         func: inspectElement,
         args: [req.marker],
       })
-      return result?.result ?? null
+      const inspection = result?.result
+      if (!inspection?.a11y) return inspection ?? null
+      const [found] = await chrome.scripting.executeScript({
+        target,
+        world: 'MAIN',
+        func: axeViolations,
+        args: [req.marker],
+      })
+      return { ...inspection, a11y: { ...inspection.a11y, violations: found?.result ?? [] } }
     }
     case 'capture': {
       const viewport = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' })

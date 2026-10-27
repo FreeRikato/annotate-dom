@@ -69,6 +69,15 @@ function pinSection({ pin, cropFile, excerpts = [] }: ExportPin, n: number): str
   if (ins.tokens?.values.length) {
     lines.push(`- Tokens: ${ins.tokens.values.map(v => `${v.prop}: ${v.value} ${v.token ? `= ${v.token}` : '(no token)'}`).join('; ')}`)
   }
+  if (ins.a11y) {
+    const { role, name, states, violations } = ins.a11y
+    const facts = [role ? `role ${code(role)}` : 'no role', name ? `name ${code(name)}` : 'no name']
+    if (states.length) facts.push(`states ${code(states.join(', '))}`)
+    lines.push(`- Accessibility: ${facts.join(', ')}`)
+    if (violations.length) {
+      lines.push(`- Axe violations: ${violations.map(v => `${code(v.id)}${v.impact ? ` (${v.impact})` : ''} at ${code(v.selector)}`).join('; ')}`)
+    }
+  }
   if (ins.text) lines.push(`- Text: ${code(ins.text.replace(/\s+/g, ' '))}`)
   lines.push(`- Box: x=${ins.box.x} y=${ins.box.y} w=${ins.box.w} h=${ins.box.h}`)
   lines.push(`- Styles: ${styleLine(ins.styles)}`)

@@ -1,8 +1,9 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { inspectElement } from './inspect'
+import { inspectElement, axeViolations } from './inspect'
 
 const runInPage: typeof inspectElement = new Function(`return ${inspectElement.toString()}`)()
+const runAxeInPage: typeof axeViolations = new Function(`return ${axeViolations.toString()}`)()
 
 function itemForm() {
   const setter = { lastRenderedReducer: () => null }
@@ -256,6 +257,20 @@ describe('inspectElement', () => {
       expect(result?.network).toEqual([])
     })
 
+    it('drops single malformed entries and keeps the valid ones', () => {
+      vi.setSystemTime(100_000)
+      document.body.innerHTML = '<p data-annotate-dom-target="m6">x</p>'
+      Reflect.set(window, '__annotateDomRecorder', {
+        read: () => ({
+          console: [{ at: 99_000, message: 'ok' }, { at: 'late', message: 'bad' }, null],
+          network: [{ at: 99_000, method: 'GET', url: 'http://localhost:3000/a', status: null, durationMs: 5 }, { at: 99_000, method: 'GET' }, 'x'],
+        }),
+      })
+      const result = runInPage('m6')
+      expect(result?.console).toEqual([{ offsetMs: -1000, message: 'ok' }])
+      expect(result?.network).toEqual([{ offsetMs: -1000, method: 'GET', url: 'http://localhost:3000/a', status: null, durationMs: 5 }])
+    })
+
     it('lists nothing when the page has no recorder', () => {
       document.body.innerHTML = '<p data-annotate-dom-target="m4">x</p>'
       const result = runInPage('m4')
@@ -384,6 +399,74 @@ describe('inspectElement', () => {
     it('escapes quotes in the name', () => {
       const locator = locatorFor(`<button data-annotate-dom-target="l8">It's on</button>`, 'l8')
       expect(locator).toBe(`getByRole('button', { name: 'It\\'s on' })`)
+    })
+  })
+  describe('accessibility', () => {
+    function a11yOf(body: string, marker: string) {
+      document.body.innerHTML = body
+      return runInPage(marker)?.a11y
+    }
+
+    it('lists role, name and state, with no violations before axe runs', () => {
+      const a11y = a11yOf('<button aria-disabled="true" data-annotate-dom-target="a1">Save</button>', 'a1')
+      expect(a11y).toEqual({ role: 'button', name: 'Save', states: ['disabled'], violations: [] })
+    })
+
+    it('reads states from native and aria attributes', () => {
+      const a11y = a11yOf(`
+        <input type="checkbox" checked required data-annotate-dom-target="a2" aria-label="Agree" aria-expanded="false" />`, 'a2')
+      expect(a11y).toEqual({ role: 'checkbox', name: 'Agree', states: ['checked', 'collapsed', 'required'], violations: [] })
+    })
+
+    it('has a null role and an empty name for a bare div', () => {
+      expect(a11yOf('<div data-annotate-dom-target="a3"></div>', 'a3')).toEqual({ role: null, name: '', states: [], violations: [] })
+    })
+
+    it('does not put axe on the page when inspecting', () => {
+      a11yOf('<button data-annotate-dom-target="a4">Go</button>', 'a4')
+      expect(Reflect.get(window, 'axe')).toBeUndefined()
+    })
+  })
+
+  describe('axeViolations', () => {
+    afterEach(() => Reflect.deleteProperty(window, 'axe'))
+
+    function fakeAxe(violations: unknown[]) {
+      const run = vi.fn(async (_context: Element) => ({ violations }))
+      Reflect.set(window, 'axe', { run })
+      return run
+    }
+
+    it('runs axe on the pinned element only and maps each failing node', async () => {
+      document.body.innerHTML = '<img src="a.png" /><div><img data-annotate-dom-target="v1" src="b.png" /></div>'
+      const run = fakeAxe([
+        { id: 'image-alt', impact: 'critical', nodes: [{ target: ['div > img'] }, { target: ['iframe', 'img'] }] },
+        { id: 'region', impact: null, nodes: [{ target: ['body'] }] },
+      ])
+      const result = await runAxeInPage('v1')
+      expect(run.mock.calls[0][0]).toBe(document.querySelector('[data-annotate-dom-target="v1"]'))
+      expect(result).toEqual([
+        { id: 'image-alt', impact: 'critical', selector: 'div > img' },
+        { id: 'image-alt', impact: 'critical', selector: 'iframe img' },
+        { id: 'region', impact: null, selector: 'body' },
+      ])
+    })
+
+    it('is empty when axe is not on the page or the element is gone', async () => {
+      document.body.innerHTML = '<p data-annotate-dom-target="v2">x</p>'
+      expect(await runAxeInPage('v2')).toEqual([])
+      fakeAxe([{ id: 'x', impact: 'minor', nodes: [{ target: ['p'] }] }])
+      expect(await runAxeInPage('missing')).toEqual([])
+    })
+
+    it('finds a real violation inside the subtree and none outside it', async () => {
+      Reflect.set(window, 'axe', (await import('axe-core')).default)
+      document.body.innerHTML = '<img src="a.png" /><div><button data-annotate-dom-target="v3">Ok</button></div>'
+      expect(await runAxeInPage('v3')).toEqual([])
+      document.body.innerHTML = '<button>Ok</button><div><img data-annotate-dom-target="v4" src="b.png" /></div>'
+      const found = await runAxeInPage('v4')
+      expect(found.map(v => v.id)).toEqual(['image-alt'])
+      expect(found[0].selector).toContain('img')
     })
   })
 })

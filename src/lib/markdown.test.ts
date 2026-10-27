@@ -217,7 +217,23 @@ describe('toMarkdown', () => {
       '- Classes: `bg-background p-4`\n' +
       '- Tokens: background-color: rgb(255, 255, 255) = var(--background); color: rgb(9, 9, 9) (no token)\n',
     )
+    const withA11y = render({
+      a11y: {
+        role: 'button',
+        name: 'Save',
+        states: ['disabled'],
+        violations: [{ id: 'color-contrast', impact: 'serious', selector: 'form > button' }],
+      },
+    })
+    expect(withA11y).toContain(
+      '- Accessibility: role `button`, name `Save`, states `disabled`\n' +
+      '- Axe violations: `color-contrast` (serious) at `form > button`\n',
+    )
+    const bare = render({ a11y: { role: null, name: '', states: [], violations: [] } })
+    expect(bare).toContain('- Accessibility: no role, no name\n')
+    expect(bare).not.toContain('Axe violations')
     for (const text of [md, render({ locator: null, tokens: { classes: [], values: [] } })]) {
+      expect(text).not.toContain('Accessibility')
       expect(text).not.toContain('Locator')
       expect(text).not.toContain('Classes')
       expect(text).not.toContain('Tokens')

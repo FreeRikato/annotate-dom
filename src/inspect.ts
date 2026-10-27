@@ -1,5 +1,6 @@
 import type {
-  Ancestor, ConsoleEvent, DesignTokens, Inspection, Interaction, NetworkEvent, OwnerSnapshot, QuerySnapshot, TokenValue,
+  Accessibility, Ancestor, AxeViolation, ConsoleEvent, DesignTokens, Inspection, Interaction, NetworkEvent, OwnerSnapshot, QuerySnapshot, RecordedConsole,
+  RecordedRequest, TokenValue,
 } from './lib/types'
 
 export function inspectElement(marker: string): Inspection | null {
@@ -218,10 +219,15 @@ export function inspectElement(marker: string): Inspection | null {
     if (!isRecord(events) || !Array.isArray(events.console) || !Array.isArray(events.network)) {
       return { console: [], network: [] }
     }
+    const isConsoleEntry = (entry: unknown): entry is RecordedConsole =>
+      isRecord(entry) && typeof entry.at === 'number' && typeof entry.message === 'string'
+    const isRequestEntry = (entry: unknown): entry is RecordedRequest =>
+      isRecord(entry) && typeof entry.at === 'number' && typeof entry.method === 'string' && typeof entry.url === 'string'
+      && (entry.status === null || typeof entry.status === 'number') && typeof entry.durationMs === 'number'
     const pinnedAt = Date.now()
     return {
-      console: events.console.map(({ at, message }) => ({ offsetMs: at - pinnedAt, message })),
-      network: events.network.map(({ at, ...rest }) => ({ offsetMs: at - pinnedAt, ...rest })),
+      console: events.console.filter(isConsoleEntry).map(({ at, message }) => ({ offsetMs: at - pinnedAt, message })),
+      network: events.network.filter(isRequestEntry).map(({ at, ...rest }) => ({ offsetMs: at - pinnedAt, ...rest })),
     }
   }
 
@@ -391,6 +397,28 @@ export function inspectElement(marker: string): Inspection | null {
     return null
   }
 
+  function statesOf(node: Element): string[] {
+    const states: string[] = []
+    const aria = (name: string) => node.getAttribute(name)
+    const field = node instanceof HTMLInputElement || node instanceof HTMLSelectElement || node instanceof HTMLTextAreaElement ? node : null
+    const textField = node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement ? node : null
+    const disabled = field?.disabled === true || ((node instanceof HTMLButtonElement || node instanceof HTMLFieldSetElement || node instanceof HTMLOptionElement) && node.disabled)
+    if (disabled || aria('aria-disabled') === 'true') states.push('disabled')
+    if ((node instanceof HTMLInputElement && node.checked) || aria('aria-checked') === 'true') states.push('checked')
+    if (aria('aria-pressed') === 'true') states.push('pressed')
+    if (aria('aria-selected') === 'true') states.push('selected')
+    if (aria('aria-expanded') === 'true') states.push('expanded')
+    if (aria('aria-expanded') === 'false') states.push('collapsed')
+    if (field?.required === true || aria('aria-required') === 'true') states.push('required')
+    if (textField?.readOnly === true || aria('aria-readonly') === 'true') states.push('readonly')
+    if (aria('aria-invalid') === 'true') states.push('invalid')
+    return states
+  }
+
+  function accessibility(node: Element): Accessibility {
+    return { role: roleOf(node), name: nameOf(node), states: statesOf(node), violations: [] }
+  }
+
   const ancestors: Ancestor[] = []
   for (let p = el.parentElement; p && p !== document.body && ancestors.length < 2; p = p.parentElement) {
     ancestors.push({ selector: describe(p), styles: pick(p, LAYOUT_KEYS) })
@@ -417,5 +445,31 @@ export function inspectElement(marker: string): Inspection | null {
     interaction: interactionState(),
     tokens: designTokens(el),
     locator: locatorFor(el),
+    a11y: accessibility(el),
   }
+}
+
+export async function axeViolations(marker: string): Promise<AxeViolation[]> {
+  const el = document.querySelector(`[data-annotate-dom-target="${marker}"]`)
+  const axe: unknown = Reflect.get(window, 'axe')
+  const run: unknown = typeof axe === 'object' && axe !== null ? Reflect.get(axe, 'run') : null
+  if (!el || typeof run !== 'function') return []
+  const results: unknown = await run.call(axe, el)
+  const found: unknown = typeof results === 'object' && results !== null ? Reflect.get(results, 'violations') : null
+  if (!Array.isArray(found)) return []
+  const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null
+  const out: AxeViolation[] = []
+  for (const violation of found) {
+    if (!isRecord(violation)) continue
+    const nodes: unknown = violation.nodes
+    for (const node of Array.isArray(nodes) ? nodes : []) {
+      if (!isRecord(node)) continue
+      out.push({
+        id: String(violation.id),
+        impact: typeof violation.impact === 'string' ? violation.impact : null,
+        selector: Array.isArray(node.target) ? node.target.join(' ') : '',
+      })
+    }
+  }
+  return out.slice(0, 20)
 }

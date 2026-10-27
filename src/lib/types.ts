@@ -61,6 +61,19 @@ export type DesignTokens = {
   readonly values: readonly TokenValue[]
 }
 
+export type AxeViolation = {
+  readonly id: string
+  readonly impact: string | null
+  readonly selector: string
+}
+
+export type Accessibility = {
+  readonly role: string | null
+  readonly name: string
+  readonly states: readonly string[]
+  readonly violations: readonly AxeViolation[]
+}
+
 export type Inspection = {
   readonly selector: string
   readonly tag: string
@@ -79,6 +92,7 @@ export type Inspection = {
   readonly interaction?: Interaction
   readonly tokens?: DesignTokens
   readonly locator?: string | null
+  readonly a11y?: Accessibility
 }
 
 export type SourceLoc = { readonly file: string; readonly line: number; readonly column: number }
