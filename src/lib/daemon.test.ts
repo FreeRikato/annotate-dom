@@ -1,9 +1,12 @@
+// @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import manifest from '../../public/manifest.json'
 import {
-  createDaemonClient, FIRST_RETRY_MS, MAX_RETRY_MS, PING_MS, SEND_TIMEOUT_MS, sendLabel,
-  type SocketHandlers, type SocketLike,
+  clearRecaptureTarget, createDaemonClient, createRecaptureHandler, FIRST_RETRY_MS, markRecaptureTarget, TARGET_ATTR, waitForQuiet, MAX_RETRY_MS, PING_MS, SEND_TIMEOUT_MS, sendLabel,
+  type RecaptureTabs, type SocketHandlers, type SocketLike,
 } from './daemon'
+import { inspectElement } from '../inspect'
+import type { Inspection } from './types'
 
 class FakeSocket implements SocketLike {
   sent: unknown[] = []
@@ -32,7 +35,12 @@ function setup() {
     },
   })
   client.start()
-  return { client, sockets, latest: () => sockets[sockets.length - 1]! }
+  const latest = (): FakeSocket => {
+    const socket = sockets.at(-1)
+    if (!socket) throw new Error('no socket yet')
+    return socket
+  }
+  return { client, sockets, latest }
 }
 
 function reqIdOf(frame: unknown): string {
@@ -140,5 +148,193 @@ describe('manifest key', () => {
     expect(await extensionId(manifest.key)).toBe(first)
     expect(first).toMatch(/^[a-p]{32}$/)
     expect(first).toBe('ccapopgckfhbcejibalobjclcaodjeed')
+  })
+})
+
+describe('recapture', () => {
+  const box = { x: 10, y: 20, w: 100, h: 40 }
+  const inspection: Inspection = {
+    selector: 'button', tag: 'button', html: '<button>Save</button>', htmlTruncated: false, text: 'Save',
+    box: { x: 10, y: 20, w: 100, h: 40 }, styles: {}, attributes: {}, ancestors: [],
+    viewport: { width: 800, height: 600, dpr: 1 }, react: null,
+  }
+  const request = { reqId: 'r1', url: 'http://localhost:3000/', selector: 'button', locator: null }
+
+  function fakeTabs(overrides: Partial<RecaptureTabs> = {}) {
+    const calls: string[] = []
+    const tabs: RecaptureTabs = {
+      findTab: async () => null,
+      openTab: async () => { calls.push('open'); return 7 },
+      closeTab: async () => { calls.push('close') },
+      settle: async () => { calls.push('settle') },
+      mark: async () => box,
+      unmark: async () => { calls.push('unmark') },
+      inspect: async () => inspection,
+      screenshot: async () => 'data:image/png;base64,AAAA',
+      crop: async ({ box: b }) => `cropped:${b.w}`,
+      ...overrides,
+    }
+    return { tabs, calls }
+  }
+
+  it('reuses an open tab on the pin URL and leaves it open', async () => {
+    const { tabs, calls } = fakeTabs({ findTab: async url => (url === request.url ? 3 : null) })
+    const reply = await createRecaptureHandler(tabs)(request)
+    expect(reply).toEqual({ ok: true, crop: 'cropped:100', inspection })
+    expect(calls).toEqual(['settle', 'unmark'])
+  })
+
+  it('opens a tab when none matches and closes it afterwards', async () => {
+    const { tabs, calls } = fakeTabs()
+    const reply = await createRecaptureHandler(tabs)(request)
+    expect(reply.ok).toBe(true)
+    expect(calls).toEqual(['open', 'settle', 'unmark', 'close'])
+  })
+
+  it('answers element not found, takes no screenshot, and still closes the opened tab', async () => {
+    const screenshot = vi.fn(async () => 'x')
+    const { tabs, calls } = fakeTabs({ mark: async () => null, screenshot })
+    expect(await createRecaptureHandler(tabs)(request)).toEqual({ ok: false, reason: 'element not found' })
+    expect(screenshot).not.toHaveBeenCalled()
+    expect(calls).toEqual(['open', 'settle', 'close'])
+  })
+
+  it('answers element not found when the marked element cannot be inspected', async () => {
+    const screenshot = vi.fn(async () => 'x')
+    const { tabs, calls } = fakeTabs({ inspect: async () => null, screenshot })
+    expect(await createRecaptureHandler(tabs)(request)).toEqual({ ok: false, reason: 'element not found' })
+    expect(screenshot).not.toHaveBeenCalled()
+    expect(calls).toContain('unmark')
+  })
+
+  it('removes the marker from an existing tab even when the unmark step fails', async () => {
+    const { tabs } = fakeTabs({ findTab: async () => 3, unmark: async () => { throw new Error('tab gone') } })
+    expect((await createRecaptureHandler(tabs)(request)).ok).toBe(true)
+  })
+
+  it('reports a failure message and closes the opened tab when capture throws', async () => {
+    const { tabs, calls } = fakeTabs({ screenshot: async () => { throw new Error('debugger busy') } })
+    expect(await createRecaptureHandler(tabs)(request)).toEqual({ ok: false, reason: 'debugger busy' })
+    expect(calls).toEqual(['open', 'settle', 'unmark', 'close'])
+  })
+
+  it('refuses to open or capture any url outside http://localhost and http://127.0.0.1', async () => {
+    const findTab = vi.fn(async () => null)
+    const openTab = vi.fn(async () => 7)
+    const { tabs } = fakeTabs({ findTab, openTab })
+    const handler = createRecaptureHandler(tabs)
+    for (const url of [
+      'https://bank.example/account', 'https://localhost:3000/', 'http://localhost.evil.example/', 'http://localhost@evil.example/',
+      'http://127.0.0.1.evil.example/', 'file:///etc/passwd', 'chrome://settings', 'not a url',
+    ]) {
+      expect(await handler({ ...request, url })).toEqual({ ok: false, reason: 'Recapture only opens http://localhost and http://127.0.0.1 pages' })
+    }
+    expect(findTab).not.toHaveBeenCalled()
+    expect(openTab).not.toHaveBeenCalled()
+  })
+
+  it('accepts localhost and 127.0.0.1 on any port', async () => {
+    for (const url of ['http://localhost:3000/settings?tab=a', 'http://127.0.0.1:5173/', 'http://localhost/']) {
+      expect((await createRecaptureHandler(fakeTabs().tabs)({ ...request, url })).ok).toBe(true)
+    }
+  })
+
+  it('answers a recapture frame with a recapture-result frame', async () => {
+    const sockets: FakeSocket[] = []
+    const client = createDaemonClient({
+      createSocket: handlers => { const socket = new FakeSocket(handlers); sockets.push(socket); return socket },
+      onRecapture: createRecaptureHandler(fakeTabs().tabs),
+    })
+    client.start()
+    const socket = sockets[0]
+    if (!socket) throw new Error('no socket yet')
+    socket.handlers.onOpen()
+    socket.reply({ type: 'recapture', ...request })
+    await vi.waitFor(() => expect(socket.sent).toContainEqual({ type: 'recapture-result', reqId: 'r1', ok: true, crop: 'cropped:100', inspection }))
+  })
+
+  it('needs the debugger permission and no tabs permission', () => {
+    expect(manifest.permissions).toContain('debugger')
+    expect(manifest.permissions).not.toContain('tabs')
+  })
+})
+
+describe('markRecaptureTarget', () => {
+  const inPage: typeof markRecaptureTarget = new Function(`return ${markRecaptureTarget.toString()}`)()
+  const mark = (selector: string, locator: string | null) => inPage({ selector, locator, marker: 'm', attr: TARGET_ATTR })
+
+  it('prefers the locator and falls back to the selector', () => {
+    document.body.innerHTML = '<button id="a">Save</button><button id="b">Toggle dark mode</button>'
+    expect(mark('#a', "getByRole('button', { name: 'Toggle dark mode' })")).not.toBeNull()
+    expect(document.querySelector('#b')?.getAttribute(TARGET_ATTR)).toBe('m')
+    document.querySelector('#b')?.removeAttribute(TARGET_ATTR)
+    mark('#a', "getByRole('button', { name: 'Gone' })")
+    expect(document.querySelector('#a')?.getAttribute(TARGET_ATTR)).toBe('m')
+  })
+
+  it('never guesses: an ambiguous locator and a missing selector find nothing', () => {
+    document.body.innerHTML = '<button>Save</button><button>Save</button>'
+    expect(mark('#nope', "getByRole('button', { name: 'Save' })")).toBeNull()
+    expect(document.querySelector(`[${TARGET_ATTR}]`)).toBeNull()
+  })
+})
+
+describe('clearRecaptureTarget', () => {
+  const inPage: typeof clearRecaptureTarget = new Function(`return ${clearRecaptureTarget.toString()}`)()
+
+  it('removes the marker so a later html comparison sees the original markup', () => {
+    document.body.innerHTML = '<div class="card"><button>Save</button></div>'
+    const button = document.querySelector('button')
+    button?.setAttribute(TARGET_ATTR, 'recapture-1')
+    inPage({ marker: 'recapture-1', attr: TARGET_ATTR })
+    expect(document.body.innerHTML).toBe('<div class="card"><button>Save</button></div>')
+  })
+})
+
+describe('markRecaptureTarget with the locators inspect writes', () => {
+  const inspectInPage: typeof inspectElement = new Function(`return ${inspectElement.toString()}`)()
+  const markInPage: typeof markRecaptureTarget = new Function(`return ${markRecaptureTarget.toString()}`)()
+  const subjects: Record<string, string> = {
+    heading: '<h1 data-annotate-dom-target="p">Settings</h1><p>other</p>',
+    'labelled email input': '<label for="e">Email address</label><input id="e" type="email" data-annotate-dom-target="p" /><input type="text" aria-label="Name" />',
+    'labelled checkbox': '<input type="checkbox" aria-label="Agree" data-annotate-dom-target="p" /><input type="checkbox" aria-label="Subscribe" />',
+    image: '<img alt="Company logo" data-annotate-dom-target="p" /><img alt="Avatar" />',
+    link: '<a href="/docs" data-annotate-dom-target="p">Docs</a><a href="/blog">Blog</a>',
+    'aria-labelledby button': '<span id="l">Close dialog</span><button aria-labelledby="l" data-annotate-dom-target="p"></button><button>Open</button>',
+    'submit input': '<input type="submit" value="Go" data-annotate-dom-target="p" /><input type="reset" value="Clear" />',
+    'unique text': '<div data-annotate-dom-target="p">Only here</div><div>Elsewhere</div>',
+    'test id': '<div data-testid="card" data-annotate-dom-target="p"><i></i></div><div data-testid="other"><i></i></div>',
+  }
+
+  for (const [name, html] of Object.entries(subjects)) {
+    it(`finds the ${name} by its locator without the selector`, () => {
+      document.body.innerHTML = html
+      const subject = document.querySelector('[data-annotate-dom-target="p"]')
+      const locator = inspectInPage('p')?.locator
+      expect(locator).toBeTruthy()
+      subject?.removeAttribute(TARGET_ATTR)
+      expect(markInPage({ selector: '#does-not-exist', locator: locator ?? null, marker: 'found', attr: TARGET_ATTR })).not.toBeNull()
+      expect(document.querySelector('[data-annotate-dom-target="found"]')).toBe(subject)
+    })
+  }
+})
+
+describe('waitForQuiet', () => {
+  it('resolves after the quiet period without mutations and at the cap while they continue', async () => {
+    vi.useFakeTimers()
+    const settled = vi.fn()
+    void waitForQuiet({ quietMs: 1000, capMs: 10_000 }).then(settled)
+    await vi.advanceTimersByTimeAsync(999)
+    expect(settled).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(settled).toHaveBeenCalled()
+
+    const capped = vi.fn()
+    void waitForQuiet({ quietMs: 1000, capMs: 10_000 }).then(capped)
+    for (let i = 0; i < 12; i += 1) {
+      await vi.advanceTimersByTimeAsync(900)
+      document.body.append(document.createElement('i'))
+    }
+    expect(capped).toHaveBeenCalled()
   })
 })

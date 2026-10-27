@@ -1,10 +1,11 @@
-import type { Pin } from './types'
+import type { Box, Inspection, Pin } from './types'
 
 export const DAEMON_URL = 'ws://localhost:4747/ws'
 export const PING_MS = 20_000
 export const FIRST_RETRY_MS = 250
 export const MAX_RETRY_MS = 5_000
 export const SEND_TIMEOUT_MS = 30_000
+export const TARGET_ATTR = 'data-annotate-dom-target'
 
 export type BatchFrame = {
   readonly type: 'batch'
@@ -17,7 +18,157 @@ export type BatchFrame = {
 
 export type SavedBatch = { readonly project: string; readonly folder: string; readonly prompt: string }
 
+export type RecaptureRequest = {
+  readonly reqId: string
+  readonly url: string
+  readonly selector: string
+  readonly locator: string | null
+}
+
+export type RecaptureReply =
+  | { readonly ok: true; readonly crop: string; readonly inspection: Inspection }
+  | { readonly ok: false; readonly reason: string }
+
+export type RecaptureTabs = {
+  readonly findTab: (url: string) => Promise<number | null>
+  readonly openTab: (url: string) => Promise<number>
+  readonly closeTab: (tabId: number) => Promise<void>
+  readonly settle: (tabId: number) => Promise<void>
+  readonly mark: (args: { readonly tabId: number; readonly selector: string; readonly locator: string | null; readonly marker: string }) => Promise<Box | null>
+  readonly unmark: (args: { readonly tabId: number; readonly marker: string }) => Promise<void>
+  readonly inspect: (args: { readonly tabId: number; readonly marker: string }) => Promise<Inspection | null>
+  readonly screenshot: (tabId: number) => Promise<string>
+  readonly crop: (args: { readonly shot: string; readonly box: Box; readonly viewportWidth: number }) => Promise<string>
+}
+
+export const ELEMENT_NOT_FOUND = 'element not found'
+export const URL_NOT_ALLOWED = 'Recapture only opens http://localhost and http://127.0.0.1 pages'
+
+function isLocalPage(url: string): boolean {
+  try {
+    const { protocol, hostname } = new URL(url)
+    return protocol === 'http:' && (hostname === 'localhost' || hostname === '127.0.0.1')
+  } catch {
+    return false
+  }
+}
+
+export function createRecaptureHandler(tabs: RecaptureTabs) {
+  return async ({ reqId, url, selector, locator }: RecaptureRequest): Promise<RecaptureReply> => {
+    if (!isLocalPage(url)) return { ok: false, reason: URL_NOT_ALLOWED }
+    const existing = await tabs.findTab(url)
+    const tabId = existing ?? await tabs.openTab(url)
+    try {
+      await tabs.settle(tabId)
+      const marker = `recapture-${reqId}`
+      const box = await tabs.mark({ tabId, selector, locator, marker })
+      if (!box) return { ok: false, reason: ELEMENT_NOT_FOUND }
+      try {
+        const inspection = await tabs.inspect({ tabId, marker })
+        if (!inspection) return { ok: false, reason: ELEMENT_NOT_FOUND }
+        const shot = await tabs.screenshot(tabId)
+        const crop = await tabs.crop({ shot, box, viewportWidth: inspection.viewport.width })
+        return { ok: true, crop, inspection }
+      } finally {
+        await tabs.unmark({ tabId, marker }).catch(() => undefined)
+      }
+    } catch (err: unknown) {
+      return { ok: false, reason: err instanceof Error ? err.message : String(err) }
+    } finally {
+      if (existing === null) await tabs.closeTab(tabId).catch(() => undefined)
+    }
+  }
+}
+
+export function markRecaptureTarget({ selector, locator, marker, attr }: {
+  readonly selector: string
+  readonly locator: string | null
+  readonly marker: string
+  readonly attr: string
+}): Box | null {
+  const text = (value: string | null | undefined) => (value ?? '').replace(/\s+/g, ' ').trim()
+  const contains = (haystack: string, needle: string) => haystack.toLowerCase().includes(needle.toLowerCase())
+  const tagRoles: Record<string, string> = {
+    button: 'button', select: 'combobox', textarea: 'textbox', img: 'img', nav: 'navigation', main: 'main',
+    h1: 'heading', h2: 'heading', h3: 'heading', h4: 'heading', h5: 'heading', h6: 'heading',
+  }
+  const inputRoles: Record<string, string> = {
+    button: 'button', submit: 'button', reset: 'button', checkbox: 'checkbox', radio: 'radio',
+    range: 'slider', search: 'searchbox', text: 'textbox', email: 'textbox', tel: 'textbox', url: 'textbox', number: 'spinbutton',
+  }
+  const roleOf = (el: Element): string | null => {
+    const explicit = el.getAttribute('role')?.trim().split(/\s+/)[0]
+    if (explicit) return explicit
+    const tag = el.tagName.toLowerCase()
+    if (tag === 'a') return el.hasAttribute('href') ? 'link' : null
+    if (tag === 'input') return inputRoles[(el.getAttribute('type') ?? 'text').toLowerCase()] ?? null
+    return tagRoles[tag] ?? null
+  }
+  const labelOf = (el: Element): string => {
+    const aria = text(el.getAttribute('aria-label'))
+    if (aria) return aria
+    const ids = el.getAttribute('aria-labelledby')?.split(/\s+/) ?? []
+    const referenced = ids.map(id => text(document.getElementById(id)?.textContent ?? '')).join(' ').trim()
+    if (referenced) return referenced
+    if (!(el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement)) return ''
+    return text(Array.from(el.labels ?? []).map(l => l.textContent).join(' '))
+  }
+  const nameOf = (el: Element): string => {
+    const label = labelOf(el)
+    if (label) return label
+    if (el instanceof HTMLInputElement && ['button', 'submit', 'reset'].includes(el.type)) return text(el.value)
+    if (el instanceof HTMLImageElement) return text(el.alt)
+    return text(el.textContent)
+  }
+  const quoted = "'((?:[^'\\\\]|\\\\.)*)'"
+  const unquote = (value: string | undefined) => (value ?? '').replace(/\\(['\\])/g, '$1')
+  const all = Array.from(document.querySelectorAll('*'))
+  const only = (matching: (el: Element) => boolean) => {
+    const hits = all.filter(matching)
+    return hits.length === 1 ? hits[0] : null
+  }
+  function byLocator(source: string): Element | null {
+    const role = new RegExp(`^getByRole\\(${quoted}, \\{ name: ${quoted} \\}\\)$`).exec(source)
+    if (role) return only(el => roleOf(el) === unquote(role[1]) && contains(nameOf(el), unquote(role[2])))
+    const label = new RegExp(`^getByLabel\\(${quoted}\\)$`).exec(source)
+    if (label) return only(el => contains(labelOf(el), unquote(label[1])))
+    const exact = new RegExp(`^getByText\\(${quoted}, \\{ exact: true \\}\\)$`).exec(source)
+    if (exact) return only(el => text(el.textContent) === unquote(exact[1]) && !Array.from(el.children).some(c => text(c.textContent) === unquote(exact[1])))
+    const testId = new RegExp(`^getByTestId\\(${quoted}\\)$`).exec(source)
+    return testId ? only(el => el.getAttribute('data-testid') === unquote(testId[1])) : null
+  }
+  const el = (locator ? byLocator(locator) : null) ?? document.querySelector(selector)
+  if (!el) return null
+  el.setAttribute(attr, marker)
+  const rect = el.getBoundingClientRect()
+  return { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) }
+}
+
+export function clearRecaptureTarget({ marker, attr }: { readonly marker: string; readonly attr: string }): void {
+  document.querySelector(`[${attr}="${marker}"]`)?.removeAttribute(attr)
+}
+
+export function waitForQuiet({ quietMs, capMs }: { readonly quietMs: number; readonly capMs: number }): Promise<void> {
+  return new Promise(resolve => {
+    let quiet: ReturnType<typeof setTimeout>
+    const done = () => {
+      observer.disconnect()
+      clearTimeout(quiet)
+      clearTimeout(cap)
+      resolve()
+    }
+    const observer = new MutationObserver(() => {
+      clearTimeout(quiet)
+      quiet = setTimeout(done, quietMs)
+    })
+    observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true })
+    quiet = setTimeout(done, quietMs)
+    const cap = setTimeout(done, capMs)
+  })
+}
+
 type ServerFrame =
+  | ({ readonly type: 'recapture' } & RecaptureRequest)
   | ({ readonly type: 'batch-saved'; readonly reqId: string } & SavedBatch)
   | { readonly type: 'error'; readonly reqId: string; readonly message: string }
   | { readonly type: 'pong' }
@@ -57,6 +208,12 @@ function parseFrame(data: unknown): ServerFrame | null {
   if (typeof frame !== 'object' || frame === null || !('type' in frame)) return null
   if (frame.type === 'pong') return { type: 'pong' }
   if (!('reqId' in frame) || typeof frame.reqId !== 'string') return null
+  if (
+    frame.type === 'recapture' && 'url' in frame && typeof frame.url === 'string' && 'selector' in frame &&
+    typeof frame.selector === 'string' && 'locator' in frame && (typeof frame.locator === 'string' || frame.locator === null)
+  ) {
+    return { type: 'recapture', reqId: frame.reqId, url: frame.url, selector: frame.selector, locator: frame.locator }
+  }
   if (frame.type === 'error' && 'message' in frame && typeof frame.message === 'string') {
     return { type: 'error', reqId: frame.reqId, message: frame.message }
   }
@@ -75,7 +232,10 @@ type Pending = {
   readonly timer: ReturnType<typeof setTimeout>
 }
 
-export function createDaemonClient({ createSocket }: { readonly createSocket: SocketFactory }) {
+export function createDaemonClient({ createSocket, onRecapture }: {
+  readonly createSocket: SocketFactory
+  readonly onRecapture?: (request: RecaptureRequest) => Promise<RecaptureReply>
+}) {
   const pending = new Map<string, Pending>()
   const listeners = new Set<(connected: boolean) => void>()
   let socket: SocketLike | null = null
@@ -115,7 +275,10 @@ export function createDaemonClient({ createSocket }: { readonly createSocket: So
       onMessage(data) {
         const frame = parseFrame(data)
         if (frame?.type === 'batch-saved') settle(frame.reqId, entry => entry.resolve({ project: frame.project, folder: frame.folder, prompt: frame.prompt }))
-        else if (frame?.type === 'error') settle(frame.reqId, entry => entry.reject(new Error(frame.message)))
+        else if (frame?.type === 'recapture' && onRecapture) {
+          const target = socket
+          void onRecapture(frame).then(reply => target?.send(JSON.stringify({ type: 'recapture-result', reqId: frame.reqId, ...reply })))
+        } else if (frame?.type === 'error') settle(frame.reqId, entry => entry.reject(new Error(frame.message)))
       },
     })
     socket = current

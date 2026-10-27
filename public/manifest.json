@@ -11,7 +11,7 @@
     "service_worker": "background.js",
     "type": "module"
   },
-  "permissions": ["activeTab", "scripting", "storage", "unlimitedStorage", "downloads", "clipboardWrite"],
+  "permissions": ["activeTab", "scripting", "storage", "unlimitedStorage", "downloads", "clipboardWrite", "debugger"],
   "host_permissions": ["http://localhost/*", "http://127.0.0.1/*"],
   "content_scripts": [
     {
