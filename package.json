@@ -7,8 +7,10 @@
     "build": "tsc && bun scripts/build.ts",
     "build:test": "bun scripts/build.ts --test",
     "test": "vitest run src",
-    "test:server": "bun test server",
-    "test:e2e": "bun run build:test && playwright test"
+    "test:server": "bun test server scripts",
+    "test:e2e": "bun run build:test && playwright test",
+    "daemon:install": "bun scripts/daemon-install.ts",
+    "daemon:uninstall": "bun scripts/daemon-uninstall.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.1",

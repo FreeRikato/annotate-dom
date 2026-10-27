@@ -7,6 +7,16 @@ const APP_URL = process.env.APP_URL ?? 'http://localhost:3000'
 const APP_ROOT = process.env.APP_ROOT ?? resolve(process.env.HOME ?? '', 'Developer/Personal/granite-inventory-management')
 const EXTENSION = resolve(import.meta.dirname, '../dist-test')
 
+const SKIP_APP_SPEC = process.env.SKIP_APP_SPEC === '1'
+
+test.beforeAll(async () => {
+  test.skip(SKIP_APP_SPEC, 'SKIP_APP_SPEC=1')
+  const daemonRunning = await fetch('http://localhost:4747/health').then(() => true, () => false)
+  expect(daemonRunning, 'a daemon holds port 4747, so the button reads Send: stop it to run the Copy all flow').toBe(false)
+  const reachable = await fetch(APP_URL).then(() => true, () => false)
+  expect(reachable, `APP_URL ${APP_URL} is not reachable: start the app, set APP_URL, or set SKIP_APP_SPEC=1 to skip this spec`).toBe(true)
+})
+
 test('pins the login theme toggle and copies markdown with resolved React sources', async () => {
   const context = await chromium.launchPersistentContext(mkdtempSync(join(tmpdir(), 'annotate-dom-')), {
     channel: 'chromium',
