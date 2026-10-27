@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createResolver, type Fetcher } from './resolve'
 
 const ORIGIN = 'http://localhost:3000'
@@ -89,5 +89,131 @@ describe('createResolver', () => {
     const resolver = createResolver({ pageOrigin: ORIGIN, fetcher })
     const loc = await resolver.resolve({ fn: 'P', file: 'about://React/Server/file:///a/.next/x.js', line: 1, column: 1 })
     expect(loc).toBeNull()
+  })
+
+  describe('fetch limits', () => {
+    afterEach(() => vi.useRealTimers())
+
+    const chunkUrl = (n: number) => `${ORIGIN}/_next/static/chunks/c${n}._.js`
+    const frameOn = (n: number) => ({ fn: 'F', file: chunkUrl(n), line: 6, column: 1 })
+
+    it('runs at most 3 fetches at once and still resolves every frame', async () => {
+      let inFlight = 0
+      let peak = 0
+      const fetcher: Fetcher = async url => {
+        inFlight++
+        peak = Math.max(peak, inFlight)
+        await new Promise(r => setTimeout(r, 5))
+        inFlight--
+        if (url.endsWith('.map')) return new Response(sectionedMap)
+        return new Response(chunk.replace('abc._.js.map', `${url.split('/').at(-1)}.map`))
+      }
+      const resolver = createResolver({ pageOrigin: ORIGIN, fetcher })
+      const frames = Array.from({ length: 10 }, (_, i) => frameOn(i))
+      const results = await resolver.resolveAll(frames)
+      expect(peak).toBe(3)
+      expect(results).toHaveLength(10)
+      for (const loc of results) expect(loc).toEqual({ file: '/Users/me/app/components/theme-toggle.tsx', line: 2, column: 1 })
+    })
+
+    it('resolves a frame to null after 8000 ms when its chunk never settles, leaving other frames resolved', async () => {
+      vi.useFakeTimers()
+      const fetcher: Fetcher = url => {
+        if (url === chunkUrl(0)) return new Promise<Response>(() => {})
+        if (url.endsWith('.map')) return Promise.resolve(new Response(sectionedMap))
+        return Promise.resolve(new Response(chunk.replace('abc._.js.map', `${url.split('/').at(-1)}.map`)))
+      }
+      const resolver = createResolver({ pageOrigin: ORIGIN, fetcher })
+      const pending = resolver.resolveAll([frameOn(0), frameOn(1)])
+      await vi.advanceTimersByTimeAsync(7999)
+      let settled = false
+      void pending.then(() => (settled = true))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(settled).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      const [hung, healthy] = await pending
+      expect(hung).toBeNull()
+      expect(healthy).toEqual({ file: '/Users/me/app/components/theme-toggle.tsx', line: 2, column: 1 })
+    })
+
+    it('passes an abort signal that fires at the timeout', async () => {
+      vi.useFakeTimers()
+      let signal: AbortSignal | undefined
+      const fetcher: Fetcher = (_url, init) => {
+        signal = init?.signal ?? undefined
+        return new Promise<Response>(() => {})
+      }
+      const resolver = createResolver({ pageOrigin: ORIGIN, fetcher })
+      const pending = resolver.resolve(frameOn(0))
+      await vi.advanceTimersByTimeAsync(7999)
+      expect(signal?.aborted).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(signal?.aborted).toBe(true)
+      expect(await pending).toBeNull()
+    })
+
+    it('fetches again after a thrown fetch, a 404 chunk and a timed-out chunk', async () => {
+      vi.useFakeTimers()
+      const behaviours = {
+        thrown: () => Promise.reject(new Error('network down')),
+        missing: () => Promise.resolve(new Response('nope', { status: 404 })),
+        hung: () => new Promise<Response>(() => {}),
+      }
+      for (const [name, behave] of Object.entries(behaviours)) {
+        const calls: string[] = []
+        const fetcher: Fetcher = url => {
+          calls.push(url)
+          return behave()
+        }
+        const resolver = createResolver({ pageOrigin: ORIGIN, fetcher })
+        const first = resolver.resolve(frameOn(0))
+        await vi.advanceTimersByTimeAsync(8000)
+        expect(await first, name).toBeNull()
+        const second = resolver.resolve(frameOn(0))
+        await vi.advanceTimersByTimeAsync(8000)
+        expect(await second, name).toBeNull()
+        expect(calls, name).toEqual([chunkUrl(0), chunkUrl(0)])
+      }
+    })
+
+    it('treats a 404 source map as a failure and fetches it again', async () => {
+      const { fetcher, calls } = routes({ [chunkUrl(0)]: () => new Response(chunk) })
+      const resolver = createResolver({ pageOrigin: ORIGIN, fetcher })
+      expect(await resolver.resolve(frameOn(0))).toBeNull()
+      expect(await resolver.resolve(frameOn(0))).toBeNull()
+      expect(calls.filter(u => u.endsWith('.map'))).toHaveLength(2)
+    })
+
+    it('keeps a successful chunk cached across resolves', async () => {
+      const { fetcher, calls } = routes({
+        [chunkUrl(0)]: () => new Response(chunk),
+        [`${ORIGIN}/_next/static/chunks/abc._.js.map`]: () => new Response(sectionedMap),
+      })
+      const resolver = createResolver({ pageOrigin: ORIGIN, fetcher })
+      await resolver.resolve(frameOn(0))
+      await resolver.resolve(frameOn(0))
+      expect(calls).toHaveLength(2)
+    })
+
+    it('gives the dev-server request the same timeout', async () => {
+      vi.useFakeTimers()
+      const fetcher: Fetcher = () => new Promise<Response>(() => {})
+      const resolver = createResolver({ pageOrigin: ORIGIN, fetcher })
+      const pending = resolver.resolve({ fn: 'P', file: 'about://React/Server/file:///a/.next/x.js', line: 1, column: 1 })
+      await vi.advanceTimersByTimeAsync(8000)
+      expect(await pending).toBeNull()
+    })
+
+    it('ignores a non-2xx dev-server response even when its body looks valid', async () => {
+      const body = [{ status: 'fulfilled', value: { originalStackFrame: { file: 'app/page.tsx', line1: 1, column1: 1 } } }]
+      const resolver = createResolver({ pageOrigin: ORIGIN, fetcher: async () => Response.json(body, { status: 500 }) })
+      const loc = await resolver.resolve({ fn: 'P', file: 'about://React/Server/file:///a/.next/x.js', line: 1, column: 1 })
+      expect(loc).toBeNull()
+    })
+
+    it('resolves null entries and keeps input order', async () => {
+      const resolver = createResolver({ pageOrigin: ORIGIN, fetcher: async () => new Response('', { status: 404 }) })
+      expect(await resolver.resolveAll([null, null])).toEqual([null, null])
+    })
   })
 })
