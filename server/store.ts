@@ -1,7 +1,7 @@
 import { readFile, readdir, writeFile } from 'node:fs/promises'
 import { join, sep } from 'node:path'
 import type { SourceLoc } from '../src/lib/types'
-import type { StoredBatch, StoredPin } from './batch'
+import type { StoredBatch, StoredPin, StoredRecapture } from './batch'
 
 export type PinStatus = StoredPin['status']
 
@@ -90,7 +90,7 @@ export async function listAnnotations({ home, project, status }: {
     })))
 }
 
-async function locate({ home, id, project }: {
+export async function locate({ home, id, project }: {
   readonly home: string
   readonly id: string
   readonly project?: string
@@ -154,5 +154,16 @@ export async function resolveAnnotation(args: {
     dir: found.dir,
     n: found.pin.n,
     update: pin => ({ ...pin, status: 'resolved', summary: args.summary, resolvedAt: args.now }),
+  })
+}
+
+export async function addRecapture({ found, recapture }: {
+  readonly found: Located
+  readonly recapture: StoredRecapture
+}): Promise<boolean> {
+  return updatePin({
+    dir: found.dir,
+    n: found.pin.n,
+    update: pin => ({ ...pin, recaptures: [...pin.recaptures, recapture] }),
   })
 }

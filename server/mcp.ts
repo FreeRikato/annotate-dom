@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import { z } from 'zod'
+import { type ExtensionLink, recapture } from './recapture'
 import { AmbiguousAnnotationError, getAnnotation, listAnnotations, resolveAnnotation } from './store'
 
 const PROJECT_HINT = 'Pass your current working directory as `project`.'
@@ -24,7 +25,7 @@ function reportAmbiguity<Args, Result>(run: (args: Args) => Promise<Result>) {
   }
 }
 
-function buildServer(home: string): McpServer {
+function buildServer(home: string, link: ExtensionLink): McpServer {
   const server = new McpServer({ name: 'annotate-dom', version: '0.0.0' })
   server.registerTool('list_annotations', {
     description: `List annotations the user pinned on their running app, newest first. ${PROJECT_HINT}`,
@@ -44,6 +45,13 @@ function buildServer(home: string): McpServer {
     const resolved = await resolveAnnotation({ home, id, summary, project, now: Date.now() })
     return resolved ? asText({ id, status: 'resolved', summary }) : notFound(id)
   }))
+  server.registerTool('recapture', {
+    description: `Re-find an annotated element in the running app after your fix and return the before and after screenshots with a style and HTML diff. ${PROJECT_HINT}`,
+    inputSchema: { id: z.string(), project: projectArg },
+  }, reportAmbiguity(async ({ id, project }) => {
+    const outcome = await recapture({ home, id, project, link, now: Date.now() })
+    return outcome.ok ? asText(outcome) : toolError(outcome.error)
+  }))
   return server
 }
 
@@ -51,15 +59,16 @@ export function isLocalHost(host: string | null, port: number): boolean {
   return host === `localhost:${port}` || host === `127.0.0.1:${port}`
 }
 
-export async function handleMcp({ req, home, port }: {
+export async function handleMcp({ req, home, port, link }: {
   readonly req: Request
   readonly home: string
   readonly port: number
+  readonly link: ExtensionLink
 }): Promise<Response> {
   if (!isLocalHost(req.headers.get('host'), port) || req.headers.has('origin')) {
     return new Response('forbidden', { status: 403 })
   }
   const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true })
-  await buildServer(home).connect(transport)
+  await buildServer(home, link).connect(transport)
   return transport.handleRequest(req)
 }

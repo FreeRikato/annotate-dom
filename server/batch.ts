@@ -3,6 +3,7 @@ import { isAbsolute, join, resolve } from 'node:path'
 import { type Excerpt, type ExportPage, toMarkdown } from '../src/lib/markdown'
 import type { CallSite, Pin, SourceLoc } from '../src/lib/types'
 import { readExcerpts } from './excerpt'
+import { knownProjects } from './store'
 
 export type WirePage = { readonly path: string; readonly url: string; readonly viewport: string | null }
 
@@ -126,7 +127,7 @@ async function excludeAnnotations(root: string): Promise<void> {
 
 async function recordProject(home: string, root: string): Promise<void> {
   const file = join(home, 'projects.json')
-  const known: string[] = JSON.parse(await readFile(file, 'utf8').catch(() => '[]'))
+  const known = await knownProjects(home)
   if (known.includes(root)) return
   await mkdir(home, { recursive: true })
   await writeFile(file, JSON.stringify([...known, root], null, 2))

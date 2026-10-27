@@ -136,6 +136,16 @@ test('projects.json records each root once', async () => {
   expect(JSON.parse(await readFile(join(home, 'projects.json'), 'utf8'))).toEqual([root])
 })
 
+test('a malformed projects.json is replaced and the batch is written once', async () => {
+  await mkdir(home, { recursive: true })
+  for (const [minute, bad] of ['{not json', '{"a":1}', '"text"'].entries()) {
+    await writeFile(join(home, 'projects.json'), bad)
+    const { folder } = await writeBatch({ root, home, batch: wireBatch({ createdAt: new Date(2026, 9, 27, 14, minute).getTime() }) })
+    expect(folder).not.toMatch(/-\d$/)
+    expect(JSON.parse(await readFile(join(home, 'projects.json'), 'utf8'))).toEqual([root])
+  }
+})
+
 test('an exclude file without a trailing newline keeps its last line intact', async () => {
   await writeFile(join(root, '.git/info/exclude'), '*.log')
   await writeBatch({ root, home, batch: wireBatch() })

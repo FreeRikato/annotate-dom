@@ -76,9 +76,9 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true })
 })
 
-test('the server offers list, get and resolve and tells the agent to pass its working directory', async () => {
+test('the server offers list, get, resolve and recapture and tells the agent to pass its working directory', async () => {
   const { tools } = await client.listTools()
-  expect(tools.map(t => t.name).sort()).toEqual(['get_annotation', 'list_annotations', 'resolve_annotation'])
+  expect(tools.map(t => t.name).sort()).toEqual(['get_annotation', 'list_annotations', 'recapture', 'resolve_annotation'])
   for (const tool of tools) expect(tool.description).toContain('working directory')
 })
 
@@ -129,7 +129,7 @@ test('resolve updates only that pin and the default list drops it', async () => 
 test('an id present in two projects is a tool error naming both until a project is passed', async () => {
   await sendBatch(batchOf(join(appB, 'src/y.tsx'), 9, ['b clash']))
   const id = '2026-10-27-1409-settings#1'
-  for (const [name, args] of [['get_annotation', { id }], ['resolve_annotation', { id, summary: 'x' }]] as const) {
+  for (const [name, args] of [['get_annotation', { id }], ['resolve_annotation', { id, summary: 'x' }], ['recapture', { id }]] as const) {
     const result = await call(name, args)
     expect(result.isError).toBe(true)
     expect(result.text).toContain(`annotation id ${id} exists in several projects`)

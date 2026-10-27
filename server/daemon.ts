@@ -1,5 +1,7 @@
+import { PROJECT_ROOT_NOT_FOUND } from '../src/lib/types'
 import { type WireBatch, writeBatch } from './batch'
 import { handleMcp } from './mcp'
+import { createExtensionLink, isRecaptureResult } from './recapture'
 import { cwdOfListeningPort, findProjectRoot } from './root'
 
 export type DaemonOptions = {
@@ -7,6 +9,7 @@ export type DaemonOptions = {
   readonly home: string
   readonly extensionId: string
   readonly cwdOfPort?: (port: number) => Promise<string | null>
+  readonly recaptureTimeoutMs?: number
 }
 
 export type Daemon = { readonly port: number; readonly stop: () => Promise<void> }
@@ -50,14 +53,15 @@ function sourceFiles(batch: WireBatch): string[] {
     .filter((file): file is string => typeof file === 'string')
 }
 
-export async function createDaemon({ port, home, extensionId, cwdOfPort = cwdOfListeningPort }: DaemonOptions): Promise<Daemon> {
+export async function createDaemon({ port, home, extensionId, cwdOfPort = cwdOfListeningPort, recaptureTimeoutMs }: DaemonOptions): Promise<Daemon> {
   const allowedOrigin = `chrome-extension://${extensionId}`
+  const link = createExtensionLink(recaptureTimeoutMs)
   let queue: Promise<unknown> = Promise.resolve()
   let boundPort = port
 
   async function save({ reqId, batch }: BatchFrame): Promise<object> {
     const root = await findProjectRoot({ sourceFiles: sourceFiles(batch), pageUrls: batch.pages.map(p => p.url), cwdOfPort })
-    if (!root) return { type: 'error', reqId, message: 'project root not found' }
+    if (!root) return { type: 'error', reqId, message: PROJECT_ROOT_NOT_FOUND }
     const { folder, prompt } = await writeBatch({ root, home, batch })
     return { type: 'batch-saved', reqId, project: root, folder, prompt }
   }
@@ -72,15 +76,18 @@ export async function createDaemon({ port, home, extensionId, cwdOfPort = cwdOfL
         if (req.headers.get('origin') !== allowedOrigin) return new Response('forbidden', { status: 403 })
         return srv.upgrade(req) ? undefined : new Response('upgrade failed', { status: 400 })
       }
-      if (pathname === '/mcp') return handleMcp({ req, home, port: srv.port as number })
+      if (pathname === '/mcp') return handleMcp({ req, home, port: boundPort, link })
       return new Response('not found', { status: 404 })
     },
     websocket: {
       maxPayloadLength: MAX_FRAME_BYTES,
+      open: ws => link.connect(ws),
+      close: ws => link.disconnect(ws),
       message(ws, raw) {
         const frame = parseJson(String(raw))
         if (!isRecord(frame)) return
         if (frame.type === 'ping') return void ws.send(JSON.stringify({ type: 'pong' }))
+        if (frame.type === 'recapture-result') return void (isRecaptureResult(frame) && link.deliver(frame))
         if (frame.type !== 'batch') return
         const parsed = parseBatchFrame(frame)
         const reqId = typeof frame.reqId === 'string' ? frame.reqId : ''
