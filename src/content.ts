@@ -1,9 +1,10 @@
 import { copyText } from './lib/clipboard'
 import { sendLabel } from './lib/daemon'
 import { FOCUSED_ATTR, HOVERED_ATTR, MARKER_ATTR, type Reply, type Request, type Responses } from './lib/messages'
+import { withSelectedCallSites } from './lib/callsites'
 import { createResolver } from './lib/resolve'
-import { callSiteFrame } from './lib/stack'
-import { emptyBatch, PROJECT_ROOT_NOT_FOUND, type Batch, type Box, type CallSite, type Pin } from './lib/types'
+import { callSiteFrame, nextBasePath } from './lib/stack'
+import { emptyBatch, PROJECT_ROOT_NOT_FOUND, type Batch, type Box, type Pin } from './lib/types'
 
 const GLOBAL_KEY = '__annotateDomToggle'
 const DAEMON_POLL_MS = 2000
@@ -114,7 +115,11 @@ function start(): () => void {
   shadow.append(style, root)
   document.documentElement.append(host)
 
-  const resolver = createResolver({ pageOrigin: location.origin, fetcher: (url, init) => fetch(url, init) })
+  const resolver = createResolver({
+    pageOrigin: location.origin,
+    fetcher: (url, init) => fetch(url, init),
+    basePath: nextBasePath([...document.scripts].map(s => s.src), location.origin),
+  })
   let batch: Batch = emptyBatch
   let visible = true
   let picking = true
@@ -241,12 +246,12 @@ function start(): () => void {
         hovered?.removeAttribute(HOVERED_ATTR)
       }
       if (!inspection) throw new Error('Element is gone')
-      const owners = inspection.react?.owners ?? []
-      const [elementSite, ...ownerSites] = await Promise.all([
-        resolver.resolve(callSiteFrame(inspection.react?.elementStack ?? null)),
-        ...owners.map(o => resolver.resolve(callSiteFrame(o.stack))),
+      const [elementSite, ...ownerSites] = await resolver.resolveAll([
+        callSiteFrame(inspection.react?.elementStack ?? null),
+        ...(inspection.react?.owners ?? []).map(o => callSiteFrame(o.stack)),
       ])
-      const callSites: CallSite[] = owners.map((o, i) => ({ name: o.name, loc: ownerSites[i] ?? null }))
+      const selected = withSelectedCallSites(inspection, ownerSites)
+      inspection = selected.inspection
 
       host.style.visibility = 'hidden'
       await nextFrame()
@@ -272,7 +277,7 @@ function start(): () => void {
         createdAt: Date.now(),
         inspection,
         elementSite: elementSite ?? null,
-        callSites,
+        callSites: selected.callSites,
         crop: shot.crop,
       }
       batch = await call({ kind: 'add-pin', pin, viewport: shot.viewport, dpr: shot.dpr, rects })
