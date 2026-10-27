@@ -34,7 +34,8 @@ export function createResolver({ pageOrigin, fetcher }: { readonly pageOrigin: s
       if (!ref) return null
       const mapUrl = new URL(ref, chunkUrl).href
       const text = await (await fetcher(mapUrl)).text()
-      return new FlattenMap(text, mapUrl)
+      const sourcesBase = mapUrl.startsWith('data:') ? chunkUrl : mapUrl
+      return new FlattenMap(text, sourcesBase)
     } catch {
       return null
     }
