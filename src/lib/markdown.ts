@@ -36,6 +36,10 @@ function stamp(ms: number): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
+function secondsBefore(offsetMs: number): string {
+  return `${(Math.abs(offsetMs) / 1000).toFixed(1)} s before`
+}
+
 function pinSection({ pin, cropFile, excerpts = [] }: ExportPin, n: number): string[] {
   const { inspection: ins } = pin
   const owners = ins.react?.owners ?? []
@@ -68,6 +72,16 @@ function pinSection({ pin, cropFile, excerpts = [] }: ExportPin, n: number): str
   for (const owner of owners) {
     if (owner.props) lines.push(`- Props of ${owner.name}: ${code(owner.props)}`)
     if (owner.state) lines.push(`- State of ${owner.name} (useState/useReducer in hook order): ${code(owner.state)}`)
+  }
+  if (ins.console?.length) {
+    lines.push('- Console errors in the 30 s before the pin:')
+    for (const e of ins.console) lines.push(`  - ${secondsBefore(e.offsetMs)}: ${code(e.message)}`)
+  }
+  if (ins.network?.length) {
+    lines.push('- Failed or slow requests in the 30 s before the pin:')
+    for (const r of ins.network) {
+      lines.push(`  - ${secondsBefore(r.offsetMs)}: ${r.method} ${code(r.url)} ${r.status ?? 'failed'} in ${r.durationMs} ms`)
+    }
   }
   if (ins.ancestors.length) {
     lines.push('- Parents (nearest first):')

@@ -104,6 +104,38 @@ describe('toMarkdown', () => {
     expect(md).not.toContain('Code around')
   })
 
+  it('lists console errors and failed or slow requests only when present', () => {
+    const recorded = toMarkdown({
+      origin: 'http://localhost:3000',
+      createdAt: 0,
+      pages: [{
+        path: '/settings', url: 'http://localhost:3000/settings', viewportFile: null,
+        pins: [{
+          pin: {
+            ...pin('a', '/settings', 'x'),
+            inspection: {
+              ...inspection,
+              console: [{ offsetMs: -2000, message: 'boom' }],
+              network: [
+                { offsetMs: -2000, method: 'POST', url: 'http://localhost:3000/api/save', status: 500, durationMs: 120 },
+                { offsetMs: -3200, method: 'GET', url: 'http://localhost:3000/slow', status: null, durationMs: 3200 },
+              ],
+            },
+          },
+          cropFile: null,
+        }],
+      }],
+    })
+    expect(recorded).toContain(
+      '- Console errors in the 30 s before the pin:\n  - 2.0 s before: `boom`\n' +
+      '- Failed or slow requests in the 30 s before the pin:\n' +
+      '  - 2.0 s before: POST `http://localhost:3000/api/save` 500 in 120 ms\n' +
+      '  - 3.2 s before: GET `http://localhost:3000/slow` failed in 3200 ms\n',
+    )
+    expect(md).not.toContain('Console errors')
+    expect(md).not.toContain('Failed or slow requests')
+  })
+
   it('has no em dashes', () => {
     expect(md).not.toContain('—')
   })

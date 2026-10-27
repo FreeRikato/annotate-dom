@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { inspectElement } from './inspect'
 
 const runInPage: typeof inspectElement = new Function(`return ${inspectElement.toString()}`)()
@@ -76,5 +76,44 @@ describe('inspectElement', () => {
     document.body.innerHTML = '<p data-annotate-dom-target="m2">plain</p>'
     expect(runInPage('missing')).toBeNull()
     expect(runInPage('m2')?.react).toBeNull()
+  })
+
+  describe('page recorder', () => {
+    afterEach(() => {
+      Reflect.deleteProperty(window, '__annotateDomRecorder')
+      vi.useRealTimers()
+    })
+
+    it('lists recorded events with offsets relative to the pin', () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(100_000)
+      document.body.innerHTML = '<p data-annotate-dom-target="m3">x</p>'
+      Reflect.set(window, '__annotateDomRecorder', {
+        read: () => ({
+          console: [{ at: 98_000, message: 'boom' }],
+          network: [{ at: 96_800, method: 'GET', url: 'http://localhost:3000/slow', status: 200, durationMs: 3200 }],
+        }),
+      })
+      const result = runInPage('m3')
+      expect(result?.console).toEqual([{ offsetMs: -2000, message: 'boom' }])
+      expect(result?.network).toEqual([
+        { offsetMs: -3200, method: 'GET', url: 'http://localhost:3000/slow', status: 200, durationMs: 3200 },
+      ])
+    })
+
+    it('lists nothing when the recorder returns a malformed buffer', () => {
+      document.body.innerHTML = '<p data-annotate-dom-target="m5">x</p>'
+      Reflect.set(window, '__annotateDomRecorder', { read: () => ({ console: [{ at: 1, message: 'a' }] }) })
+      const result = runInPage('m5')
+      expect(result?.console).toEqual([])
+      expect(result?.network).toEqual([])
+    })
+
+    it('lists nothing when the page has no recorder', () => {
+      document.body.innerHTML = '<p data-annotate-dom-target="m4">x</p>'
+      const result = runInPage('m4')
+      expect(result?.console).toEqual([])
+      expect(result?.network).toEqual([])
+    })
   })
 })

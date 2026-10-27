@@ -15,6 +15,25 @@ export type ReactSnapshot = {
   readonly owners: readonly OwnerSnapshot[]
 }
 
+export type RecordedConsole = { readonly at: number; readonly message: string }
+
+export type RecordedRequest = {
+  readonly at: number
+  readonly method: string
+  readonly url: string
+  readonly status: number | null
+  readonly durationMs: number
+}
+
+export type RecordedEvents = {
+  readonly console: readonly RecordedConsole[]
+  readonly network: readonly RecordedRequest[]
+}
+
+export type ConsoleEvent = { readonly offsetMs: number; readonly message: string }
+
+export type NetworkEvent = Omit<RecordedRequest, 'at'> & { readonly offsetMs: number }
+
 export type Inspection = {
   readonly selector: string
   readonly tag: string
@@ -27,6 +46,8 @@ export type Inspection = {
   readonly ancestors: readonly Ancestor[]
   readonly viewport: { readonly width: number; readonly height: number; readonly dpr: number }
   readonly react: ReactSnapshot | null
+  readonly console?: readonly ConsoleEvent[]
+  readonly network?: readonly NetworkEvent[]
 }
 
 export type SourceLoc = { readonly file: string; readonly line: number; readonly column: number }

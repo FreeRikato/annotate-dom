@@ -24,6 +24,16 @@ await build({
   },
 })
 
+await build({
+  configFile: false,
+  publicDir: false,
+  build: {
+    outDir,
+    emptyOutDir: false,
+    lib: { entry: resolve(import.meta.dirname, '../src/recorder.ts'), formats: ['iife'], name: 'annotateDomRecorder', fileName: () => 'recorder.js' },
+  },
+})
+
 if (test) {
   const path = resolve(outDir, 'manifest.json')
   const manifest = JSON.parse(await readFile(path, 'utf8'))

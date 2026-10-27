@@ -1,4 +1,4 @@
-import type { Ancestor, Inspection, OwnerSnapshot } from './lib/types'
+import type { Ancestor, ConsoleEvent, Inspection, NetworkEvent, OwnerSnapshot } from './lib/types'
 
 export function inspectElement(marker: string): Inspection | null {
   const ATTR = 'data-annotate-dom-target'
@@ -17,6 +17,7 @@ export function inspectElement(marker: string): Inspection | null {
   const PROPS_LIMIT = 2000
   const MAX_OWNERS = 6
   const OWNERS_WITH_DATA = 3
+  const RECORDER_KEY = '__annotateDomRecorder'
 
   const el = document.querySelector(`[${ATTR}="${marker}"]`)
   if (!el) return null
@@ -191,6 +192,20 @@ export function inspectElement(marker: string): Inspection | null {
     return out
   }
 
+  function recorded(): { console: ConsoleEvent[]; network: NetworkEvent[] } {
+    const recorder: unknown = Reflect.get(window, RECORDER_KEY)
+    const read = isRecord(recorder) ? recorder.read : null
+    const events: unknown = typeof read === 'function' ? read.call(recorder) : null
+    if (!isRecord(events) || !Array.isArray(events.console) || !Array.isArray(events.network)) {
+      return { console: [], network: [] }
+    }
+    const pinnedAt = Date.now()
+    return {
+      console: events.console.map(({ at, message }) => ({ offsetMs: at - pinnedAt, message })),
+      network: events.network.map(({ at, ...rest }) => ({ offsetMs: at - pinnedAt, ...rest })),
+    }
+  }
+
   const ancestors: Ancestor[] = []
   for (let p = el.parentElement; p && p !== document.body && ancestors.length < 2; p = p.parentElement) {
     ancestors.push({ selector: describe(p), styles: pick(p, LAYOUT_KEYS) })
@@ -212,5 +227,6 @@ export function inspectElement(marker: string): Inspection | null {
     ancestors,
     viewport: { width: innerWidth, height: innerHeight, dpr: devicePixelRatio },
     react: fiber ? { elementStack: stackOf(fiber._debugStack), owners: owners(fiber._debugOwner) } : null,
+    ...recorded(),
   }
 }
