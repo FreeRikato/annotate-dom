@@ -1,3 +1,4 @@
+import { copyText } from './lib/clipboard'
 import { sendLabel } from './lib/daemon'
 import { FOCUSED_ATTR, HOVERED_ATTR, MARKER_ATTR, type Reply, type Request, type Responses } from './lib/messages'
 import { createResolver } from './lib/resolve'
@@ -354,15 +355,17 @@ function start(): () => void {
     try {
       const { count, folder, prompt } = await call({ kind: 'send', origin: location.origin })
       batch = emptyBatch
-      try {
-        await navigator.clipboard.writeText(prompt)
+      const delivered = await copyText(prompt)
+      const sent = `Sent ${count} annotation${count === 1 ? '' : 's'} to .annotations/${folder}/`
+      if (delivered === 'clipboard') {
         fallback.style.display = 'none'
-      } catch {
+        setToast(sent, false)
+      } else {
         fallbackText.value = prompt
         fallback.style.display = 'block'
         fallbackText.select()
+        setToast(`${sent}; clipboard blocked, prompt is in the panel.`, false)
       }
-      setToast(`Sent ${count} annotation${count === 1 ? '' : 's'} to .annotations/${folder}/`, false)
     } catch (err: unknown) {
       busy = false
       if (err instanceof Error && err.message === PROJECT_ROOT_NOT_FOUND) return copyAll()
@@ -379,11 +382,10 @@ function start(): () => void {
     try {
       const { markdown, count } = await call({ kind: 'export', origin: location.origin })
       batch = emptyBatch
-      try {
-        await navigator.clipboard.writeText(markdown)
+      if ((await copyText(markdown)) === 'clipboard') {
         fallback.style.display = 'none'
         setToast(`Copied ${count} annotation${count === 1 ? '' : 's'} to the clipboard.`, true)
-      } catch {
+      } else {
         fallbackText.value = markdown
         fallback.style.display = 'block'
         fallbackText.select()
