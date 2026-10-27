@@ -263,4 +263,127 @@ describe('inspectElement', () => {
       expect(result?.network).toEqual([])
     })
   })
+  describe('design tokens', () => {
+    function pageWithTheme(body: string) {
+      document.head.innerHTML = '<style>:root { --background: #ffffff; --space-4: 1rem; --foreground: rgb(10, 10, 10) }</style>'
+      document.body.innerHTML = body
+    }
+
+    afterEach(() => {
+      document.head.innerHTML = ''
+    })
+
+    it('lists the classes and matches computed values against :root custom properties', () => {
+      pageWithTheme(`<div class="bg-background p-4" data-annotate-dom-target="t1"
+        style="background-color: #ffffff; padding: 16px; color: rgb(9, 9, 9)">x</div>`)
+      const tokens = runInPage('t1')?.tokens
+      expect(tokens?.classes).toEqual(['bg-background', 'p-4'])
+      expect(tokens?.values).toContainEqual({ prop: 'background-color', value: '#ffffff', token: 'var(--background)' })
+      expect(tokens?.values).toContainEqual({ prop: 'padding', value: '16px', token: 'var(--space-4)' })
+    })
+
+    it('lists a value that no custom property equals with no match', () => {
+      pageWithTheme('<div data-annotate-dom-target="t2" style="color: rgb(9, 9, 9)">x</div>')
+      expect(runInPage('t2')?.tokens?.values).toContainEqual({ prop: 'color', value: 'rgb(9, 9, 9)', token: null })
+    })
+
+    it('does not match inherited text colour to a custom property that is not a colour', () => {
+      document.head.innerHTML = '<style>:root { --radius: 0.5rem; --foreground: rgb(10, 10, 10) } body { color: rgb(10, 10, 10) }</style>'
+      document.body.innerHTML = '<p data-annotate-dom-target="t8">plain</p>'
+      const colour = runInPage('t8')?.tokens?.values.find(v => v.prop === 'color')
+      expect(colour).toEqual({ prop: 'color', value: 'rgb(10, 10, 10)', token: 'var(--foreground)' })
+    })
+
+    it('ignores custom properties that are not set on :root', () => {
+      document.head.innerHTML = '<style>.card { --card-bg: #ffffff }</style>'
+      document.body.innerHTML = '<div class="card" data-annotate-dom-target="t5" style="background-color: #ffffff">x</div>'
+      expect(runInPage('t5')?.tokens?.values).toEqual([{ prop: 'background-color', value: '#ffffff', token: null }])
+    })
+
+    it('finds custom properties inside grouping rules such as @media', () => {
+      document.head.innerHTML = '<style>@media screen { :root { --brand: #ff0000 } }</style>'
+      document.body.innerHTML = '<div data-annotate-dom-target="t7" style="color: #ff0000">x</div>'
+      expect(runInPage('t7')?.tokens?.values).toEqual([{ prop: 'color', value: '#ff0000', token: 'var(--brand)' }])
+    })
+
+    it('leaves out unset and zero values', () => {
+      pageWithTheme('<div data-annotate-dom-target="t3" style="margin: 0px">x</div>')
+      expect(runInPage('t3')?.tokens?.values).toEqual([])
+    })
+
+    it('has no matches when the page defines no custom properties', () => {
+      document.head.innerHTML = ''
+      document.body.innerHTML = '<div class="a" data-annotate-dom-target="t4" style="padding: 16px">x</div>'
+      expect(runInPage('t4')?.tokens).toEqual({ classes: ['a'], values: [{ prop: 'padding', value: '16px', token: null }] })
+    })
+  })
+
+  describe('locator', () => {
+    function locatorFor(body: string, marker: string) {
+      document.body.innerHTML = body
+      return runInPage(marker)?.locator
+    }
+
+    function target(marker: string) {
+      return document.querySelector(`[data-annotate-dom-target="${marker}"]`)
+    }
+
+    it('names a button by role and accessible name, and that locator finds only it', () => {
+      const locator = locatorFor(`
+        <button>Save</button>
+        <button data-annotate-dom-target="l1">Toggle dark mode</button>`, 'l1')
+      expect(locator).toBe(`getByRole('button', { name: 'Toggle dark mode' })`)
+      const found = Array.from(document.querySelectorAll('button')).filter(b => b.textContent === 'Toggle dark mode')
+      expect(found).toEqual([target('l1')])
+    })
+
+    it('falls back to the label for a control with no role', () => {
+      const locator = locatorFor(`
+        <label for="email">Email</label>
+        <input id="email" type="password" data-annotate-dom-target="l2" />
+        <label>Name <input type="text" /></label>`, 'l2')
+      expect(locator).toBe(`getByLabel('Email')`)
+      const labelled = document.querySelector<HTMLLabelElement>('label[for]')?.control
+      expect(labelled).toBe(target('l2'))
+    })
+
+    it('uses exact text when it is unique and no role or label applies', () => {
+      const locator = locatorFor('<p>Total</p><p data-annotate-dom-target="l3">Total due</p>', 'l3')
+      expect(locator).toBe(`getByText('Total due', { exact: true })`)
+    })
+
+    it('names the innermost element when a wrapper has the same text', () => {
+      const locator = locatorFor('<div><span data-annotate-dom-target="l9">Total</span></div>', 'l9')
+      expect(locator).toBe(`getByText('Total', { exact: true })`)
+    })
+
+    it('uses the test id when nothing else is unique', () => {
+      const locator = locatorFor('<div data-testid="row-2"></div><div data-testid="row-3" data-annotate-dom-target="l4"></div>', 'l4')
+      expect(locator).toBe(`getByTestId('row-3')`)
+      expect(document.querySelectorAll('[data-testid="row-3"]')).toHaveLength(1)
+    })
+
+    it('skips a role locator that matches more than one element', () => {
+      const locator = locatorFor(`
+        <button>Delete</button>
+        <button data-annotate-dom-target="l5" data-testid="del-2">Delete</button>`, 'l5')
+      expect(locator).toBe(`getByTestId('del-2')`)
+    })
+
+    it('counts a longer name that contains the name as a second match', () => {
+      const locator = locatorFor(`
+        <button>Save all</button>
+        <button data-annotate-dom-target="l6">Save</button>`, 'l6')
+      expect(locator).toBe(`getByText('Save', { exact: true })`)
+    })
+
+    it('is null when no rule gives a unique match', () => {
+      expect(locatorFor('<div></div><div data-annotate-dom-target="l7"></div>', 'l7')).toBeNull()
+    })
+
+    it('escapes quotes in the name', () => {
+      const locator = locatorFor(`<button data-annotate-dom-target="l8">It's on</button>`, 'l8')
+      expect(locator).toBe(`getByRole('button', { name: 'It\\'s on' })`)
+    })
+  })
 })

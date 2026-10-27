@@ -192,6 +192,38 @@ describe('toMarkdown', () => {
     }
   })
 
+  it('lists the locator, classes and token matches next to the selector, only when present', () => {
+    const render = (extra: Partial<Inspection>) => toMarkdown({
+      origin: 'http://localhost:3000',
+      createdAt: 0,
+      pages: [{
+        path: '/settings', url: 'http://localhost:3000/settings', viewportFile: null,
+        pins: [{ pin: { ...pin('a', '/settings', 'x'), inspection: { ...inspection, ...extra } }, cropFile: null }],
+      }],
+    })
+    const withTokens = render({
+      locator: "getByRole('button', { name: 'Save' })",
+      tokens: {
+        classes: ['bg-background', 'p-4'],
+        values: [
+          { prop: 'background-color', value: 'rgb(255, 255, 255)', token: 'var(--background)' },
+          { prop: 'color', value: 'rgb(9, 9, 9)', token: null },
+        ],
+      },
+    })
+    expect(withTokens).toContain(
+      '- Selector: `form > button[type="submit"]`\n' +
+      "- Locator: `getByRole('button', { name: 'Save' })`\n" +
+      '- Classes: `bg-background p-4`\n' +
+      '- Tokens: background-color: rgb(255, 255, 255) = var(--background); color: rgb(9, 9, 9) (no token)\n',
+    )
+    for (const text of [md, render({ locator: null, tokens: { classes: [], values: [] } })]) {
+      expect(text).not.toContain('Locator')
+      expect(text).not.toContain('Classes')
+      expect(text).not.toContain('Tokens')
+    }
+  })
+
   it('has no em dashes', () => {
     expect(md).not.toContain('—')
   })

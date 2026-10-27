@@ -50,6 +50,17 @@ export type Interaction = {
   readonly searchParams: readonly { readonly key: string; readonly value: string }[]
 }
 
+export type TokenValue = {
+  readonly prop: string
+  readonly value: string
+  readonly token: string | null
+}
+
+export type DesignTokens = {
+  readonly classes: readonly string[]
+  readonly values: readonly TokenValue[]
+}
+
 export type Inspection = {
   readonly selector: string
   readonly tag: string
@@ -66,6 +77,8 @@ export type Inspection = {
   readonly network?: readonly NetworkEvent[]
   readonly queries?: readonly QuerySnapshot[]
   readonly interaction?: Interaction
+  readonly tokens?: DesignTokens
+  readonly locator?: string | null
 }
 
 export type SourceLoc = { readonly file: string; readonly line: number; readonly column: number }

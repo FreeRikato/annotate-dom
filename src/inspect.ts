@@ -1,4 +1,6 @@
-import type { Ancestor, ConsoleEvent, Inspection, Interaction, NetworkEvent, OwnerSnapshot, QuerySnapshot } from './lib/types'
+import type {
+  Ancestor, ConsoleEvent, DesignTokens, Inspection, Interaction, NetworkEvent, OwnerSnapshot, QuerySnapshot, TokenValue,
+} from './lib/types'
 
 export function inspectElement(marker: string): Inspection | null {
   const ATTR = 'data-annotate-dom-target'
@@ -25,6 +27,16 @@ export function inspectElement(marker: string): Inspection | null {
   const MAX_SHAPE_KEYS = 10
   const ERROR_LIMIT = 300
   const MAX_DIALOGS = 5
+  const TOKEN_KEYS = ['color', 'background-color', 'padding', 'margin', 'gap', 'border-radius']
+  const EMPTY_VALUES = new Set(['', '0px', 'none', 'normal', 'auto', 'transparent', 'rgba(0, 0, 0, 0)'])
+  const TAG_ROLES: Record<string, string> = {
+    button: 'button', select: 'combobox', textarea: 'textbox', img: 'img', nav: 'navigation', main: 'main',
+    h1: 'heading', h2: 'heading', h3: 'heading', h4: 'heading', h5: 'heading', h6: 'heading',
+  }
+  const INPUT_ROLES: Record<string, string> = {
+    button: 'button', submit: 'button', reset: 'button', checkbox: 'checkbox', radio: 'radio',
+    range: 'slider', search: 'searchbox', text: 'textbox', email: 'textbox', tel: 'textbox', url: 'textbox', number: 'spinbutton',
+  }
 
   const el = document.querySelector(`[${ATTR}="${marker}"]`)
   if (!el) return null
@@ -267,6 +279,118 @@ export function inspectElement(marker: string): Inspection | null {
     }
   }
 
+  function isIterable(value: unknown): value is Iterable<unknown> {
+    return isRecord(value) && typeof Reflect.get(value, Symbol.iterator) === 'function'
+  }
+
+  function customProperties(): string[] {
+    const names = new Set<string>()
+    const visit = (rules: Iterable<unknown>) => {
+      for (const rule of rules) {
+        if (!isRecord(rule)) continue
+        const style = rule.style
+        if (isRecord(style) && typeof style.length === 'number') {
+          for (let i = 0; i < style.length; i++) {
+            const name: unknown = Reflect.get(style, i)
+            if (typeof name === 'string' && name.startsWith('--')) names.add(name)
+          }
+        }
+        if (isIterable(rule.cssRules)) visit(rule.cssRules)
+      }
+    }
+    for (const sheet of Array.from(document.styleSheets)) {
+      try {
+        visit(sheet.cssRules)
+      } catch {
+        continue
+      }
+    }
+    return Array.from(names)
+  }
+
+  function designTokens(node: Element): DesignTokens {
+    const root = getComputedStyle(document.documentElement)
+    const probe = document.createElement('div')
+    probe.style.display = 'none'
+    document.body.append(probe)
+    const resolved = (prop: string, value: string): string | null => {
+      probe.style.removeProperty(prop)
+      probe.style.setProperty(prop, value)
+      return probe.style.getPropertyValue(prop) === '' ? null : getComputedStyle(probe).getPropertyValue(prop)
+    }
+    const tokens = customProperties().map(name => ({ name, value: root.getPropertyValue(name).trim() }))
+    const computed = getComputedStyle(node)
+    const values: TokenValue[] = []
+    for (const prop of TOKEN_KEYS) {
+      const value = computed.getPropertyValue(prop)
+      if (EMPTY_VALUES.has(value)) continue
+      const match = tokens.find(t => resolved(prop, t.value) === value)
+      values.push({ prop, value, token: match ? `var(${match.name})` : null })
+    }
+    probe.remove()
+    return { classes: Array.from(node.classList), values }
+  }
+
+  function normalized(text: string | null): string {
+    return (text ?? '').replace(/\s+/g, ' ').trim()
+  }
+
+  function roleOf(node: Element): string | null {
+    const explicit = node.getAttribute('role')?.trim().split(/\s+/)[0]
+    if (explicit) return explicit
+    const tag = node.tagName.toLowerCase()
+    if (tag === 'a') return node.hasAttribute('href') ? 'link' : null
+    if (tag === 'input') return INPUT_ROLES[(node.getAttribute('type') ?? 'text').toLowerCase()] ?? null
+    return TAG_ROLES[tag] ?? null
+  }
+
+  function labelOf(node: Element): string {
+    const aria = normalized(node.getAttribute('aria-label'))
+    if (aria) return aria
+    const ids = node.getAttribute('aria-labelledby')?.split(/\s+/) ?? []
+    const referenced = ids.map(id => normalized(document.getElementById(id)?.textContent ?? '')).join(' ').trim()
+    if (referenced) return referenced
+    if (!(node instanceof HTMLInputElement || node instanceof HTMLSelectElement || node instanceof HTMLTextAreaElement)) return ''
+    return normalized(Array.from(node.labels ?? []).map(l => l.textContent).join(' '))
+  }
+
+  function nameOf(node: Element): string {
+    const label = labelOf(node)
+    if (label) return label
+    if (node instanceof HTMLInputElement && ['button', 'submit', 'reset'].includes(node.type)) return normalized(node.value)
+    if (node instanceof HTMLImageElement) return normalized(node.alt)
+    return normalized(node.textContent)
+  }
+
+  function containsText(haystack: string, needle: string): boolean {
+    return haystack.toLowerCase().includes(needle.toLowerCase())
+  }
+
+  function sourceString(value: string): string {
+    return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`
+  }
+
+  function locatorFor(node: Element): string | null {
+    const all = Array.from(document.querySelectorAll('*'))
+    const isOnly = (matching: (other: Element) => boolean) => {
+      const hits = all.filter(matching)
+      return hits.length === 1 && hits[0] === node
+    }
+    const role = roleOf(node)
+    const name = nameOf(node)
+    if (role && name && isOnly(o => roleOf(o) === role && containsText(nameOf(o), name))) {
+      return `getByRole(${sourceString(role)}, { name: ${sourceString(name)} })`
+    }
+    const label = labelOf(node)
+    if (label && isOnly(o => containsText(labelOf(o), label))) return `getByLabel(${sourceString(label)})`
+    const text = normalized(node.textContent)
+    const ownText = (o: Element) => normalized(o.textContent) === text && !Array.from(o.children).some(c => normalized(c.textContent) === text)
+    if (text && isOnly(ownText)) return `getByText(${sourceString(text)}, { exact: true })`
+    const testId = node.getAttribute('data-testid')
+    if (testId && isOnly(o => o.getAttribute('data-testid') === testId)) return `getByTestId(${sourceString(testId)})`
+    return null
+  }
+
   const ancestors: Ancestor[] = []
   for (let p = el.parentElement; p && p !== document.body && ancestors.length < 2; p = p.parentElement) {
     ancestors.push({ selector: describe(p), styles: pick(p, LAYOUT_KEYS) })
@@ -291,5 +415,7 @@ export function inspectElement(marker: string): Inspection | null {
     ...recorded(),
     queries: querySnapshots(fiber),
     interaction: interactionState(),
+    tokens: designTokens(el),
+    locator: locatorFor(el),
   }
 }

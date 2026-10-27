@@ -64,6 +64,11 @@ function pinSection({ pin, cropFile, excerpts = [] }: ExportPin, n: number): str
     lines.push('- Source: no React dev data on this element')
   }
   lines.push(`- Selector: ${code(ins.selector)}`)
+  if (ins.locator) lines.push(`- Locator: ${code(ins.locator)}`)
+  if (ins.tokens?.classes.length) lines.push(`- Classes: ${code(ins.tokens.classes.join(' '))}`)
+  if (ins.tokens?.values.length) {
+    lines.push(`- Tokens: ${ins.tokens.values.map(v => `${v.prop}: ${v.value} ${v.token ? `= ${v.token}` : '(no token)'}`).join('; ')}`)
+  }
   if (ins.text) lines.push(`- Text: ${code(ins.text.replace(/\s+/g, ' '))}`)
   lines.push(`- Box: x=${ins.box.x} y=${ins.box.y} w=${ins.box.w} h=${ins.box.h}`)
   lines.push(`- Styles: ${styleLine(ins.styles)}`)
