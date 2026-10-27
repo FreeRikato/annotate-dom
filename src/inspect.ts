@@ -21,8 +21,7 @@ export function inspectElement(marker: string): Inspection | null {
   const SECRET = /token|secret|password|key|session|auth|cookie/i
   const HTML_LIMIT = 10000
   const PROPS_LIMIT = 2000
-  const MAX_OWNERS = 6
-  const OWNERS_WITH_DATA = 3
+  const MAX_OWNERS = 20
   const RECORDER_KEY = '__annotateDomRecorder'
   const MAX_QUERIES = 20
   const MAX_SHAPE_KEYS = 10
@@ -125,14 +124,13 @@ export function inspectElement(marker: string): Inspection | null {
     const out: OwnerSnapshot[] = []
     let node = start
     while (isRecord(node) && out.length < MAX_OWNERS) {
-      const withData = out.length < OWNERS_WITH_DATA
       if (typeof node.tag === 'number') {
         out.push({
           name: typeName(node.type),
           env: 'client',
           stack: stackOf(node._debugStack),
-          props: withData ? toJson(node.memoizedProps) : null,
-          state: withData ? hookState(node) : null,
+          props: toJson(node.memoizedProps),
+          state: hookState(node),
         })
         node = node._debugOwner
       } else {
@@ -140,7 +138,7 @@ export function inspectElement(marker: string): Inspection | null {
           name: typeof node.name === 'string' ? node.name : 'Anonymous',
           env: 'server',
           stack: stackOf(node.debugStack),
-          props: withData && node.props !== undefined ? toJson(node.props) : null,
+          props: node.props !== undefined ? toJson(node.props) : null,
           state: null,
         })
         node = node.owner

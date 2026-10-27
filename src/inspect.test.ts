@@ -73,6 +73,21 @@ describe('inspectElement', () => {
     expect(JSON.parse(owners[1].props ?? 'null')).toEqual({ params: {} })
   })
 
+  it('collects up to 20 owners nearest first, each with props', () => {
+    document.body.innerHTML = '<button data-annotate-dom-target="m3">Go</button>'
+    const button = document.querySelector('button')
+    if (!button) throw new Error('fixture missing')
+    let owner: object | undefined
+    for (let n = 25; n >= 1; n--) {
+      owner = { tag: 0, type: { displayName: `Owner${n}` }, memoizedProps: { n }, memoizedState: null, _debugOwner: owner }
+    }
+    Reflect.set(button, '__reactFiber$abc', { tag: 5, type: 'button', _debugOwner: owner })
+
+    const owners = runInPage('m3')?.react?.owners ?? []
+    expect(owners.map(o => o.name)).toEqual(Array.from({ length: 20 }, (_, i) => `Owner${i + 1}`))
+    expect(owners.map(o => JSON.parse(o.props ?? 'null').n)).toEqual(Array.from({ length: 20 }, (_, i) => i + 1))
+  })
+
   it('returns null when the marker is gone and works without React', () => {
     document.body.innerHTML = '<p data-annotate-dom-target="m2">plain</p>'
     expect(runInPage('missing')).toBeNull()
