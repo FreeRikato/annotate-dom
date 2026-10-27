@@ -1,0 +1,237 @@
+import { inspectElement } from './inspect'
+import { toMarkdown, type ExportPage } from './lib/markdown'
+import { assertNever, hasRequestKind, type Reply, type Request, type Responses } from './lib/messages'
+import { emptyBatch, type Batch, type Box, type ViewportShot } from './lib/types'
+
+const batchKey = (tabId: number) => `batch:${tabId}`
+const undoKey = (tabId: number) => `undo:${tabId}`
+
+function isBatch(value: unknown): value is Batch {
+  return typeof value === 'object' && value !== null && 'pins' in value && Array.isArray(value.pins) &&
+    'viewports' in value && typeof value.viewports === 'object' && value.viewports !== null
+}
+
+async function read(key: string): Promise<Batch | null> {
+  const stored: Record<string, unknown> = await chrome.storage.local.get(key)
+  const value = stored[key]
+  return isBatch(value) ? value : null
+}
+
+async function writeBatch(tabId: number, batch: Batch): Promise<Batch> {
+  await chrome.storage.local.set({ [batchKey(tabId)]: batch })
+  await chrome.action.setBadgeText({ tabId, text: batch.pins.length ? String(batch.pins.length) : '' })
+  return batch
+}
+
+const locks = new Map<number, Promise<unknown>>()
+
+function withTab<T>(tabId: number, work: () => Promise<T>): Promise<T> {
+  const next = (locks.get(tabId) ?? Promise.resolve()).then(work, work)
+  locks.set(tabId, next.catch(() => undefined))
+  return next
+}
+
+async function toggle(tab: chrome.tabs.Tab): Promise<void> {
+  if (tab.id === undefined) return
+  await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] })
+}
+
+async function decode(dataUrl: string): Promise<ImageBitmap> {
+  return createImageBitmap(await (await fetch(dataUrl)).blob())
+}
+
+async function encode(canvas: OffscreenCanvas): Promise<string> {
+  const bytes = new Uint8Array(await (await canvas.convertToBlob({ type: 'image/png' })).arrayBuffer())
+  let binary = ''
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+  return `data:image/png;base64,${btoa(binary)}`
+}
+
+const PIN_COLOR = '#ff3b30'
+const PAD = 40
+
+async function crop({ image, rect, scale }: { readonly image: ImageBitmap; readonly rect: Box; readonly scale: number }): Promise<string> {
+  const x0 = Math.max(0, Math.floor((rect.x - PAD) * scale))
+  const y0 = Math.max(0, Math.floor((rect.y - PAD) * scale))
+  const x1 = Math.min(image.width, Math.ceil((rect.x + rect.w + PAD) * scale))
+  const y1 = Math.min(image.height, Math.ceil((rect.y + rect.h + PAD) * scale))
+  const canvas = new OffscreenCanvas(Math.max(1, x1 - x0), Math.max(1, y1 - y0))
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('No 2d context')
+  ctx.drawImage(image, x0, y0, canvas.width, canvas.height, 0, 0, canvas.width, canvas.height)
+  ctx.strokeStyle = PIN_COLOR
+  ctx.lineWidth = 2 * scale
+  ctx.strokeRect(rect.x * scale - x0, rect.y * scale - y0, rect.w * scale, rect.h * scale)
+  return encode(canvas)
+}
+
+async function numberedViewport({ shot, numbers }: { readonly shot: ViewportShot; readonly numbers: ReadonlyMap<string, number> }): Promise<string> {
+  const image = await decode(shot.image)
+  const canvas = new OffscreenCanvas(image.width, image.height)
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('No 2d context')
+  ctx.drawImage(image, 0, 0)
+  const s = shot.dpr
+  for (const [id, box] of Object.entries(shot.rects)) {
+    const n = numbers.get(id)
+    if (n === undefined) continue
+    ctx.strokeStyle = PIN_COLOR
+    ctx.lineWidth = 2 * s
+    ctx.strokeRect(box.x * s, box.y * s, box.w * s, box.h * s)
+    const r = 11 * s
+    const cx = Math.max(r, box.x * s)
+    const cy = Math.max(r, box.y * s)
+    ctx.fillStyle = PIN_COLOR
+    ctx.beginPath()
+    ctx.arc(cx, cy, r, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.fillStyle = '#fff'
+    ctx.font = `bold ${12 * s}px system-ui, sans-serif`
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillText(String(n), cx, cy)
+  }
+  return encode(canvas)
+}
+
+function waitForDownload(id: number): Promise<void> {
+  return new Promise(resolve => {
+    const done = (item?: chrome.downloads.DownloadItem) => {
+      if (item && item.state === 'in_progress') return false
+      chrome.downloads.onChanged.removeListener(listener)
+      resolve()
+      return true
+    }
+    const listener = (delta: chrome.downloads.DownloadDelta) => {
+      if (delta.id === id && delta.state && delta.state.current !== 'in_progress') done()
+    }
+    chrome.downloads.onChanged.addListener(listener)
+    chrome.downloads.search({ id }).then(([item]) => done(item), () => done())
+  })
+}
+
+async function download({ url, filename }: { readonly url: string; readonly filename: string }): Promise<string | null> {
+  try {
+    const id = await chrome.downloads.download({ url, filename, conflictAction: 'uniquify', saveAs: false })
+    await waitForDownload(id)
+    const [item] = await chrome.downloads.search({ id })
+    return item?.state === 'complete' ? item.filename : null
+  } catch {
+    return null
+  }
+}
+
+function fileStamp(ms: number): string {
+  const d = new Date(ms)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
+}
+
+function slug(path: string): string {
+  return path.replace(/^\/+|\/+$/g, '').replace(/[^a-zA-Z0-9]+/g, '-').slice(0, 60) || 'root'
+}
+
+async function exportBatch({ tabId, origin }: { readonly tabId: number; readonly origin: string }): Promise<Responses['export']> {
+  const batch = (await read(batchKey(tabId))) ?? emptyBatch
+  const now = Date.now()
+  const prefix = `annotate-dom/${fileStamp(now)}`
+  const paths = [...new Set(batch.pins.map(p => p.path))]
+  const pages: ExportPage[] = []
+  let n = 0
+  for (const path of paths) {
+    const numbers = new Map<string, number>()
+    const pins = []
+    for (const pin of batch.pins.filter(p => p.path === path)) {
+      n += 1
+      numbers.set(pin.id, n)
+      pins.push({ pin, cropFile: await download({ url: pin.crop, filename: `${prefix}-${slug(path)}-${n}.png` }) })
+    }
+    const shot = batch.viewports[path]
+    const viewportFile = shot
+      ? await download({ url: await numberedViewport({ shot, numbers }), filename: `${prefix}-${slug(path)}-viewport.png` })
+      : null
+    pages.push({ path, url: pins[0]?.pin.url ?? origin + path, viewportFile, pins })
+  }
+  const markdown = toMarkdown({ origin, createdAt: now, pages })
+  await chrome.storage.local.set({ [undoKey(tabId)]: batch })
+  await writeBatch(tabId, emptyBatch)
+  return { markdown, count: n }
+}
+
+async function handle(req: Request, sender: chrome.runtime.MessageSender): Promise<Responses[Request['kind']]> {
+  const tab = sender.tab
+  if (tab?.id === undefined) throw new Error('No sender tab')
+  const tabId = tab.id
+  switch (req.kind) {
+    case 'inspect': {
+      const [result] = await chrome.scripting.executeScript({
+        target: { tabId, frameIds: [sender.frameId ?? 0] },
+        world: 'MAIN',
+        func: inspectElement,
+        args: [req.marker],
+      })
+      return result?.result ?? null
+    }
+    case 'capture': {
+      const viewport = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' })
+      const image = await decode(viewport)
+      const scale = image.width / req.viewportWidth
+      return { viewport, crop: await crop({ image, rect: req.rect, scale }), dpr: scale }
+    }
+    case 'get-batch':
+      return (await read(batchKey(tabId))) ?? emptyBatch
+    case 'add-pin':
+      return withTab(tabId, async () => {
+        const batch = (await read(batchKey(tabId))) ?? emptyBatch
+        const shot: ViewportShot = { image: req.viewport, dpr: req.dpr, rects: req.rects }
+        return writeBatch(tabId, {
+          pins: [...batch.pins, req.pin],
+          viewports: { ...batch.viewports, [req.pin.path]: shot },
+        })
+      })
+    case 'delete-pin':
+      return withTab(tabId, async () => {
+        const batch = (await read(batchKey(tabId))) ?? emptyBatch
+        const pins = batch.pins.filter(p => p.id !== req.id)
+        const viewports = Object.fromEntries(
+          Object.entries(batch.viewports).filter(([path]) => pins.some(p => p.path === path)),
+        )
+        return writeBatch(tabId, { pins, viewports })
+      })
+    case 'export':
+      return withTab(tabId, () => exportBatch({ tabId, origin: req.origin }))
+    case 'undo':
+      return withTab(tabId, async () => {
+        const previous = await read(undoKey(tabId))
+        if (!previous) return (await read(batchKey(tabId))) ?? emptyBatch
+        await chrome.storage.local.remove(undoKey(tabId))
+        return writeBatch(tabId, previous)
+      })
+    default:
+      return assertNever(req)
+  }
+}
+
+chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse: (reply: Reply<Request['kind']>) => void) => {
+  if (sender.id !== chrome.runtime.id || !hasRequestKind(message)) return false
+  handle(message, sender).then(
+    data => sendResponse({ ok: true, data }),
+    (err: unknown) => sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) }),
+  )
+  return true
+})
+
+chrome.action.onClicked.addListener(tab => void toggle(tab))
+
+chrome.commands.onCommand.addListener((command, tab) => {
+  if (command === 'toggle-annotate' && tab) void toggle(tab)
+})
+
+chrome.tabs.onRemoved.addListener(tabId => void chrome.storage.local.remove([batchKey(tabId), undoKey(tabId)]))
+
+chrome.runtime.onStartup.addListener(async () => {
+  const all: Record<string, unknown> = await chrome.storage.local.get(null)
+  await chrome.storage.local.remove(Object.keys(all).filter(k => k.startsWith('batch:') || k.startsWith('undo:')))
+})
+
+Reflect.set(globalThis, 'annotateDomToggle', toggle)
