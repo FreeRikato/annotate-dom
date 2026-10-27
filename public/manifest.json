@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "annotate-dom",
+  "version": "0.1.0",
+  "description": "Pin notes on DOM elements and copy them, with screenshots and React source locations, as a prompt for an AI agent.",
+  "action": {
+    "default_title": "annotate-dom (Alt+Shift+A)"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "permissions": ["activeTab", "scripting", "storage", "unlimitedStorage", "downloads", "clipboardWrite"],
+  "commands": {
+    "toggle-annotate": {
+      "suggested_key": { "default": "Alt+Shift+A" },
+      "description": "Toggle annotate mode on this tab"
+    }
+  }
+}
