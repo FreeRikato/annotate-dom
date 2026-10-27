@@ -57,3 +57,5 @@ export type Batch = {
 }
 
 export const emptyBatch: Batch = { pins: [], viewports: {} }
+
+export const PROJECT_ROOT_NOT_FOUND = 'project root not found'

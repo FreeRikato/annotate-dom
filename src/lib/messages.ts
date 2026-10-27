@@ -10,6 +10,8 @@ export type Request =
   | { readonly kind: 'delete-pin'; readonly id: string }
   | { readonly kind: 'export'; readonly origin: string }
   | { readonly kind: 'undo' }
+  | { readonly kind: 'daemon-status' }
+  | { readonly kind: 'send'; readonly origin: string }
 
 export type Responses = {
   readonly inspect: Inspection | null
@@ -19,13 +21,15 @@ export type Responses = {
   readonly 'delete-pin': Batch
   readonly export: { readonly markdown: string; readonly count: number }
   readonly undo: Batch
+  readonly 'daemon-status': { readonly connected: boolean }
+  readonly send: { readonly count: number; readonly folder: string; readonly prompt: string }
 }
 
 export type Reply<K extends Request['kind']> =
   | { readonly ok: true; readonly data: Responses[K] }
   | { readonly ok: false; readonly error: string }
 
-const KINDS: ReadonlySet<string> = new Set<Request['kind']>(['inspect', 'capture', 'get-batch', 'add-pin', 'delete-pin', 'export', 'undo'])
+const KINDS: ReadonlySet<string> = new Set<Request['kind']>(['inspect', 'capture', 'get-batch', 'add-pin', 'delete-pin', 'export', 'undo', 'daemon-status', 'send'])
 
 export function hasRequestKind(value: unknown): value is Request {
   return typeof value === 'object' && value !== null && 'kind' in value && typeof value.kind === 'string' && KINDS.has(value.kind)

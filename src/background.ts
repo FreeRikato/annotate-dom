@@ -1,7 +1,11 @@
 import { inspectElement } from './inspect'
+import { createDaemonClient, DAEMON_URL, webSocketFactory } from './lib/daemon'
 import { toMarkdown, type ExportPage } from './lib/markdown'
 import { assertNever, hasRequestKind, type Reply, type Request, type Responses } from './lib/messages'
 import { emptyBatch, type Batch, type Box, type ViewportShot } from './lib/types'
+
+const daemon = createDaemonClient({ createSocket: webSocketFactory(DAEMON_URL) })
+daemon.start()
 
 const batchKey = (tabId: number) => `batch:${tabId}`
 const undoKey = (tabId: number) => `undo:${tabId}`
@@ -158,6 +162,28 @@ async function exportBatch({ tabId, origin }: { readonly tabId: number; readonly
   return { markdown, count: n }
 }
 
+async function sendBatch({ tabId, origin }: { readonly tabId: number; readonly origin: string }): Promise<Responses['send']> {
+  const batch = (await read(batchKey(tabId))) ?? emptyBatch
+  const pages = []
+  const pins = []
+  for (const path of new Set(batch.pins.map(p => p.path))) {
+    const numbers = new Map<string, number>()
+    for (const pin of batch.pins.filter(p => p.path === path)) {
+      numbers.set(pin.id, pins.length + 1)
+      pins.push({ ...pin, n: pins.length + 1 })
+    }
+    const shot = batch.viewports[path]
+    pages.push({
+      path,
+      url: batch.pins.find(p => p.path === path)?.url ?? origin + path,
+      viewport: shot ? await numberedViewport({ shot, numbers }) : null,
+    })
+  }
+  const saved = await daemon.send({ origin, createdAt: Date.now(), pages, pins })
+  await writeBatch(tabId, emptyBatch)
+  return { count: pins.length, folder: saved.folder, prompt: saved.prompt }
+}
+
 async function handle(req: Request, sender: chrome.runtime.MessageSender): Promise<Responses[Request['kind']]> {
   const tab = sender.tab
   if (tab?.id === undefined) throw new Error('No sender tab')
@@ -200,6 +226,10 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
       })
     case 'export':
       return withTab(tabId, () => exportBatch({ tabId, origin: req.origin }))
+    case 'daemon-status':
+      return { connected: daemon.isConnected() }
+    case 'send':
+      return withTab(tabId, () => sendBatch({ tabId, origin: req.origin }))
     case 'undo':
       return withTab(tabId, async () => {
         const previous = await read(undoKey(tabId))
