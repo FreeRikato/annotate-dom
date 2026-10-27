@@ -1,6 +1,8 @@
 import type { Batch, Box, Inspection, Pin } from './types'
 
 export const MARKER_ATTR = 'data-annotate-dom-target'
+export const FOCUSED_ATTR = 'data-annotate-dom-focused'
+export const HOVERED_ATTR = 'data-annotate-dom-hovered'
 
 export type Request =
   | { readonly kind: 'inspect'; readonly marker: string }

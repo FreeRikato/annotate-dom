@@ -34,6 +34,22 @@ export type ConsoleEvent = { readonly offsetMs: number; readonly message: string
 
 export type NetworkEvent = Omit<RecordedRequest, 'at'> & { readonly offsetMs: number }
 
+export type QuerySnapshot = {
+  readonly key: string
+  readonly status: string
+  readonly fetchStatus: string
+  readonly dataUpdatedAt: number
+  readonly error: string | null
+  readonly dataShape: string
+}
+
+export type Interaction = {
+  readonly focused: string | null
+  readonly hovered: string | null
+  readonly dialogs: readonly string[]
+  readonly searchParams: readonly { readonly key: string; readonly value: string }[]
+}
+
 export type Inspection = {
   readonly selector: string
   readonly tag: string
@@ -48,6 +64,8 @@ export type Inspection = {
   readonly react: ReactSnapshot | null
   readonly console?: readonly ConsoleEvent[]
   readonly network?: readonly NetworkEvent[]
+  readonly queries?: readonly QuerySnapshot[]
+  readonly interaction?: Interaction
 }
 
 export type SourceLoc = { readonly file: string; readonly line: number; readonly column: number }

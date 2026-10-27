@@ -83,6 +83,18 @@ function pinSection({ pin, cropFile, excerpts = [] }: ExportPin, n: number): str
       lines.push(`  - ${secondsBefore(r.offsetMs)}: ${r.method} ${code(r.url)} ${r.status ?? 'failed'} in ${r.durationMs} ms`)
     }
   }
+  if (ins.queries?.length) {
+    lines.push('- Queries:')
+    for (const q of ins.queries) {
+      const updated = q.dataUpdatedAt ? `updated ${stamp(q.dataUpdatedAt)}` : 'never updated'
+      lines.push(`  - ${code(q.key)}: ${q.status}, ${q.fetchStatus}, ${updated}, data ${q.dataShape}${q.error ? `, error ${code(q.error)}` : ''}`)
+    }
+  }
+  const { focused, hovered, dialogs, searchParams } = ins.interaction ?? { focused: null, hovered: null, dialogs: [], searchParams: [] }
+  if (focused) lines.push(`- Focused: ${code(focused)}`)
+  if (hovered) lines.push(`- Hovered: ${code(hovered)}`)
+  if (dialogs.length) lines.push(`- Open dialogs: ${dialogs.map(code).join(', ')}`)
+  if (searchParams.length) lines.push(`- Search params: ${searchParams.map(p => `${p.key}=${p.value}`).join(', ')}`)
   if (ins.ancestors.length) {
     lines.push('- Parents (nearest first):')
     for (const a of ins.ancestors) lines.push(`  - ${code(a.selector)}: ${styleLine(a.styles)}`)

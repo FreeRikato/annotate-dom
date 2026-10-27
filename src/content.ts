@@ -1,5 +1,5 @@
 import { sendLabel } from './lib/daemon'
-import { MARKER_ATTR, type Reply, type Request, type Responses } from './lib/messages'
+import { FOCUSED_ATTR, HOVERED_ATTR, MARKER_ATTR, type Reply, type Request, type Responses } from './lib/messages'
 import { createResolver } from './lib/resolve'
 import { callSiteFrame } from './lib/stack'
 import { emptyBatch, PROJECT_ROOT_NOT_FOUND, type Batch, type Box, type CallSite, type Pin } from './lib/types'
@@ -121,6 +121,7 @@ function start(): () => void {
   let connected = false
   let target: Element | null = null
   let editing: Element | null = null
+  let pinContext: { readonly focused: Element | null; readonly hovered: Element | null } = { focused: null, hovered: null }
   let lastPath = location.pathname
   let toastTimer = 0
 
@@ -195,8 +196,16 @@ function start(): () => void {
     hlLabel.textContent = `${el.tagName.toLowerCase()}${id}${cls}  ${Math.round(r.width)}x${Math.round(r.height)}`
   }
 
+  function appElement(candidate: Element | null | undefined): Element | null {
+    return candidate && candidate !== document.body && candidate !== document.documentElement && candidate !== host ? candidate : null
+  }
+
   function openEditor(el: Element) {
     editing = el
+    pinContext = {
+      focused: appElement(document.activeElement),
+      hovered: appElement(Array.from(document.querySelectorAll(':hover')).filter(node => node !== host).at(-1)),
+    }
     showHighlight(el)
     const r = el.getBoundingClientRect()
     const left = Math.min(Math.max(8, r.left), innerWidth - 316)
@@ -219,11 +228,16 @@ function start(): () => void {
     const id = crypto.randomUUID()
     try {
       el.setAttribute(MARKER_ATTR, id)
+      const { focused, hovered } = pinContext
+      focused?.setAttribute(FOCUSED_ATTR, '')
+      hovered?.setAttribute(HOVERED_ATTR, '')
       let inspection
       try {
         inspection = await call({ kind: 'inspect', marker: id })
       } finally {
         el.removeAttribute(MARKER_ATTR)
+        focused?.removeAttribute(FOCUSED_ATTR)
+        hovered?.removeAttribute(HOVERED_ATTR)
       }
       if (!inspection) throw new Error('Element is gone')
       const owners = inspection.react?.owners ?? []

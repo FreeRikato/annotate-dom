@@ -136,6 +136,62 @@ describe('toMarkdown', () => {
     expect(md).not.toContain('Failed or slow requests')
   })
 
+  it('lists queries and interaction state only when present', () => {
+    const withState = toMarkdown({
+      origin: 'http://localhost:3000',
+      createdAt: 0,
+      pages: [{
+        path: '/settings', url: 'http://localhost:3000/settings', viewportFile: null,
+        pins: [{
+          pin: {
+            ...pin('a', '/settings', 'x'),
+            inspection: {
+              ...inspection,
+              queries: [
+                { key: '["user",7]', status: 'success', fetchStatus: 'idle', dataUpdatedAt: new Date(2026, 9, 26, 14, 1).getTime(), error: null, dataShape: 'object{id,name}' },
+                { key: '["todos"]', status: 'error', fetchStatus: 'idle', dataUpdatedAt: 0, error: 'Network down', dataShape: 'undefined' },
+              ],
+              interaction: {
+                focused: '#email',
+                hovered: 'button',
+                dialogs: ['#confirm', '#more'],
+                searchParams: [{ key: 'tab', value: 'stock' }, { key: 'page', value: '2' }],
+              },
+            },
+          },
+          cropFile: null,
+        }],
+      }],
+    })
+    expect(withState).toContain(
+      '- Queries:\n' +
+      '  - `["user",7]`: success, idle, updated 2026-10-26 14:01, data object{id,name}\n' +
+      '  - `["todos"]`: error, idle, never updated, data undefined, error `Network down`\n' +
+      '- Focused: `#email`\n' +
+      '- Hovered: `button`\n' +
+      '- Open dialogs: `#confirm`, `#more`\n' +
+      '- Search params: tab=stock, page=2\n',
+    )
+    const empty = toMarkdown({
+      origin: 'http://localhost:3000',
+      createdAt: 0,
+      pages: [{
+        path: '/settings', url: 'http://localhost:3000/settings', viewportFile: null,
+        pins: [{
+          pin: { ...pin('a', '/settings', 'x'), inspection: { ...inspection, queries: [], interaction: { focused: null, hovered: null, dialogs: [], searchParams: [] } } },
+          cropFile: null,
+        }],
+      }],
+    })
+    for (const text of [md, empty]) {
+      expect(text).not.toContain('Queries')
+      expect(text).not.toContain('Focused')
+      expect(text).not.toContain('Hovered')
+      expect(text).not.toContain('Open dialogs')
+      expect(text).not.toContain('Search params')
+    }
+  })
+
   it('has no em dashes', () => {
     expect(md).not.toContain('—')
   })

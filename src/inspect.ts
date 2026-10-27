@@ -1,4 +1,4 @@
-import type { Ancestor, ConsoleEvent, Inspection, NetworkEvent, OwnerSnapshot } from './lib/types'
+import type { Ancestor, ConsoleEvent, Inspection, Interaction, NetworkEvent, OwnerSnapshot, QuerySnapshot } from './lib/types'
 
 export function inspectElement(marker: string): Inspection | null {
   const ATTR = 'data-annotate-dom-target'
@@ -12,12 +12,19 @@ export function inspectElement(marker: string): Inspection | null {
     'display', 'position', 'width', 'height', 'padding', 'flex-direction', 'justify-content',
     'align-items', 'gap', 'grid-template-columns', 'overflow',
   ]
+  const OVERLAY_TAG = 'annotate-dom-root'
+  const FOCUSED_ATTR = 'data-annotate-dom-focused'
+  const HOVERED_ATTR = 'data-annotate-dom-hovered'
   const SECRET = /token|secret|password|key|session|auth|cookie/i
   const HTML_LIMIT = 10000
   const PROPS_LIMIT = 2000
   const MAX_OWNERS = 6
   const OWNERS_WITH_DATA = 3
   const RECORDER_KEY = '__annotateDomRecorder'
+  const MAX_QUERIES = 20
+  const MAX_SHAPE_KEYS = 10
+  const ERROR_LIMIT = 300
+  const MAX_DIALOGS = 5
 
   const el = document.querySelector(`[${ATTR}="${marker}"]`)
   if (!el) return null
@@ -177,7 +184,7 @@ export function inspectElement(marker: string): Inspection | null {
   function attributes(node: Element): Record<string, string> {
     const out: Record<string, string> = {}
     for (const attr of Array.from(node.attributes)) {
-      if (attr.name === ATTR) continue
+      if (attr.name.startsWith('data-annotate-dom-')) continue
       out[attr.name] = attr.value.length > 300 ? `${attr.value.slice(0, 300)}...` : attr.value
     }
     if (node instanceof HTMLInputElement) {
@@ -206,13 +213,67 @@ export function inspectElement(marker: string): Inspection | null {
     }
   }
 
+  function dataShape(data: unknown): string {
+    if (data === undefined) return 'undefined'
+    if (data === null) return 'null'
+    if (Array.isArray(data)) return `array(${data.length})`
+    if (!isRecord(data)) return typeof data
+    const keys = Object.keys(data)
+    return `object{${keys.slice(0, MAX_SHAPE_KEYS).join(',')}${keys.length > MAX_SHAPE_KEYS ? ',...' : ''}}`
+  }
+
+  function queryCacheOf(start: Record<string, unknown>): unknown[] {
+    for (let node: unknown = start; isRecord(node); node = node.return) {
+      const client = isRecord(node.memoizedProps) ? node.memoizedProps.value : null
+      if (!isRecord(client) || typeof client.getQueryCache !== 'function') continue
+      const cache: unknown = client.getQueryCache()
+      const all = isRecord(cache) && typeof cache.getAll === 'function' ? cache.getAll() : null
+      return Array.isArray(all) ? all : []
+    }
+    return []
+  }
+
+  function querySnapshots(start: Record<string, unknown> | null): QuerySnapshot[] {
+    if (!start) return []
+    const out: QuerySnapshot[] = []
+    for (const query of queryCacheOf(start).slice(0, MAX_QUERIES)) {
+      if (!isRecord(query) || !isRecord(query.state)) continue
+      const { status, fetchStatus, dataUpdatedAt, error, data } = query.state
+      out.push({
+        key: toJson(query.queryKey),
+        status: String(status),
+        fetchStatus: String(fetchStatus),
+        dataUpdatedAt: typeof dataUpdatedAt === 'number' ? dataUpdatedAt : 0,
+        error: isRecord(error) && typeof error.message === 'string' ? error.message.slice(0, ERROR_LIMIT) : null,
+        dataShape: dataShape(data),
+      })
+    }
+    return out
+  }
+
+  function interactionState(): Interaction {
+    const isApp = (node: Element | null | undefined): node is Element =>
+      !!node && node !== document.body && node !== document.documentElement && node.tagName.toLowerCase() !== OVERLAY_TAG
+    const focus = document.querySelector(`[${FOCUSED_ATTR}]`) ?? document.activeElement
+    const hovered = document.querySelector(`[${HOVERED_ATTR}]`) ?? Array.from(document.querySelectorAll(':hover')).filter(isApp).at(-1)
+    return {
+      focused: isApp(focus) ? selectorFor(focus) : null,
+      hovered: isApp(hovered) ? selectorFor(hovered) : null,
+      dialogs: Array.from(document.querySelectorAll('[role="dialog"], dialog[open], [open]')).slice(0, MAX_DIALOGS).map(selectorFor),
+      searchParams: Array.from(new URLSearchParams(location.search), ([key, value]) => ({
+        key,
+        value: SECRET.test(key) ? '[redacted]' : value,
+      })),
+    }
+  }
+
   const ancestors: Ancestor[] = []
   for (let p = el.parentElement; p && p !== document.body && ancestors.length < 2; p = p.parentElement) {
     ancestors.push({ selector: describe(p), styles: pick(p, LAYOUT_KEYS) })
   }
 
   const rect = el.getBoundingClientRect()
-  const html = el.outerHTML.replace(new RegExp(` ${ATTR}="[^"]*"`), '')
+  const html = el.outerHTML.replace(new RegExp(` data-annotate-dom-(?:target|focused|hovered)="[^"]*"`, 'g'), '')
   const fiber = fiberOf(el)
 
   return {
@@ -228,5 +289,7 @@ export function inspectElement(marker: string): Inspection | null {
     viewport: { width: innerWidth, height: innerHeight, dpr: devicePixelRatio },
     react: fiber ? { elementStack: stackOf(fiber._debugStack), owners: owners(fiber._debugOwner) } : null,
     ...recorded(),
+    queries: querySnapshots(fiber),
+    interaction: interactionState(),
   }
 }
