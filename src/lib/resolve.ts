@@ -24,8 +24,11 @@ function lastSourceMappingUrl(js: string): string | null {
   return matches.at(-1)?.[1] ?? null
 }
 
+type MapLoad = { readonly traced: Promise<TraceMap | null>; readonly join: (deadline: AbortSignal) => void }
+
 export const MAX_CONCURRENT_FETCHES = 3
 export const FETCH_TIMEOUT_MS = 8000
+export const RESOLVE_DEADLINE_MS = 8000
 
 function createLimiter(maxConcurrent: number) {
   let active = 0
@@ -57,13 +60,22 @@ function withTimeout<T>(run: (signal: AbortSignal) => Promise<T>): Promise<T> {
   return Promise.race([attempt, timedOut]).finally(() => clearTimeout(timer))
 }
 
-export function createResolver({ pageOrigin, fetcher }: { readonly pageOrigin: string; readonly fetcher: Fetcher }) {
-  const maps = new Map<string, Promise<TraceMap | null>>()
+export function createResolver({
+  pageOrigin,
+  fetcher,
+  basePath = '',
+}: {
+  readonly pageOrigin: string
+  readonly fetcher: Fetcher
+  readonly basePath?: string
+}) {
+  const maps = new Map<string, MapLoad>()
   const limited = createLimiter(MAX_CONCURRENT_FETCHES)
 
-  function fetchText(url: string): Promise<string> {
+  function fetchText(url: string, isAwaited: () => boolean): Promise<string> {
     return limited(() =>
       withTimeout(async signal => {
+        if (!isAwaited()) throw new Error(`no resolve still waits for ${url}`)
         const res = await fetcher(url, { signal })
         if (!res.ok) throw new Error(`${url} responded ${res.status}`)
         return res.text()
@@ -71,44 +83,56 @@ export function createResolver({ pageOrigin, fetcher }: { readonly pageOrigin: s
     )
   }
 
-  async function loadMap(chunkUrl: string): Promise<TraceMap | null> {
-    const js = await fetchText(chunkUrl)
+  async function loadMap(chunkUrl: string, isAwaited: () => boolean): Promise<TraceMap | null> {
+    const js = await fetchText(chunkUrl, isAwaited)
     const ref = lastSourceMappingUrl(js)
     if (!ref) return null
     const mapUrl = new URL(ref, chunkUrl).href
-    const text = await fetchText(mapUrl)
+    const text = await fetchText(mapUrl, isAwaited)
     const sourcesBase = mapUrl.startsWith('data:') ? chunkUrl : mapUrl
     return new FlattenMap(text, sourcesBase)
   }
 
-  async function resolveClient(frame: Frame): Promise<SourceLoc | null> {
-    let map = maps.get(frame.file)
-    if (!map) {
-      const loading: Promise<TraceMap | null> = loadMap(frame.file).catch(() => {
-        if (maps.get(frame.file) === loading) maps.delete(frame.file)
-        return null
-      })
-      map = loading
-      maps.set(frame.file, loading)
+  function startMapLoad(chunkUrl: string, deadline: AbortSignal): MapLoad {
+    let waiting = 0
+    const join = (callerDeadline: AbortSignal) => {
+      waiting++
+      callerDeadline.addEventListener('abort', () => waiting--, { once: true })
     }
-    const traced = await map
+    join(deadline)
+    const traced: Promise<TraceMap | null> = loadMap(chunkUrl, () => waiting > 0).catch(() => {
+      if (maps.get(chunkUrl)?.traced === traced) maps.delete(chunkUrl)
+      return null
+    })
+    return { traced, join }
+  }
+
+  async function resolveClient(frame: Frame, deadline: AbortSignal): Promise<SourceLoc | null> {
+    let load = maps.get(frame.file)
+    if (load) load.join(deadline)
+    else {
+      load = startMapLoad(frame.file, deadline)
+      maps.set(frame.file, load)
+    }
+    const traced = await load.traced
     if (!traced) return null
     const pos = originalPositionFor(traced, { line: frame.line, column: frame.column - 1 })
     if (pos.source === null) return null
     return { file: normalizeSource({ source: pos.source, pageOrigin }), line: pos.line, column: pos.column + 1 }
   }
 
-  async function resolveServer(frame: Frame): Promise<SourceLoc | null> {
-    const fileUrl = serverFileUrl(frame)
+  async function resolveServerFrames(frames: readonly Frame[], deadline: AbortSignal): Promise<(SourceLoc | null)[]> {
+    const fileUrls = frames.map(serverFileUrl)
     try {
       const body = await limited(() =>
         withTimeout(async signal => {
-          const res = await fetcher(`${pageOrigin}/__nextjs_original-stack-frames`, {
+          deadline.throwIfAborted()
+          const res = await fetcher(`${pageOrigin}${basePath}/__nextjs_original-stack-frames`, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             signal,
             body: JSON.stringify({
-              frames: [{ file: fileUrl, methodName: frame.fn, line1: frame.line, column1: frame.column }],
+              frames: frames.map((frame, i) => ({ file: fileUrls[i], methodName: frame.fn, line1: frame.line, column1: frame.column })),
               isServer: true,
               isEdgeServer: false,
               isAppDirectory: true,
@@ -119,25 +143,42 @@ export function createResolver({ pageOrigin, fetcher }: { readonly pageOrigin: s
           return json
         }),
       )
-      const resolved = Array.isArray(body) ? nextFrameOf(body[0]) : null
-      if (!resolved) return null
-      const root = projectRootFromServerFile(fileUrl)
-      const file = resolved.file.startsWith('/') || !root ? resolved.file : `${root}/${resolved.file}`
-      return { file, line: resolved.line1, column: resolved.column1 }
+      return fileUrls.map((fileUrl, i) => {
+        const resolved = Array.isArray(body) ? nextFrameOf(body[i]) : null
+        if (!resolved) return null
+        const root = projectRootFromServerFile(fileUrl)
+        const file = resolved.file.startsWith('/') || !root ? resolved.file : `${root}/${resolved.file}`
+        return { file, line: resolved.line1, column: resolved.column1 }
+      })
     } catch {
-      return null
+      return frames.map(() => null)
     }
   }
 
-  function resolve(frame: Frame | null): Promise<SourceLoc | null> {
-    if (!frame) return Promise.resolve(null)
-    return isServerFrame(frame) ? resolveServer(frame) : resolveClient(frame)
+  async function resolveAll(frames: readonly (Frame | null)[]): Promise<(SourceLoc | null)[]> {
+    const overall = new AbortController()
+    const timer = setTimeout(() => overall.abort(), RESOLVE_DEADLINE_MS)
+    const expired = new Promise<null>(resolve => overall.signal.addEventListener('abort', () => resolve(null)))
+    const bounded = <T,>(work: Promise<T>) => Promise.race([work, expired])
+    const server = frames.flatMap((frame, i) => (frame && isServerFrame(frame) ? [{ frame, i }] : []))
+    try {
+      const serverResults = server.length
+        ? bounded(resolveServerFrames(server.map(s => s.frame), overall.signal))
+        : Promise.resolve([])
+      const results = await Promise.all(
+        frames.map(frame => (frame && !isServerFrame(frame) ? bounded(resolveClient(frame, overall.signal)) : null)),
+      )
+      ;((await serverResults) ?? []).forEach((loc, k) => {
+        results[server[k].i] = loc
+      })
+      return results
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   return {
-    resolve,
-    resolveAll(frames: readonly (Frame | null)[]): Promise<(SourceLoc | null)[]> {
-      return Promise.all(frames.map(resolve))
-    },
+    resolve: async (frame: Frame | null) => (await resolveAll([frame]))[0],
+    resolveAll,
   }
 }

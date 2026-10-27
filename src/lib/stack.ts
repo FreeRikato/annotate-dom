@@ -2,7 +2,7 @@ export type Frame = { readonly fn: string; readonly file: string; readonly line:
 
 const REACT_INTERNAL = /^(exports\.jsxDEV|exports\.jsx|jsxDEV|fakeJSXCallSite|Object\.react_stack_bottom_frame|react_stack_bottom_frame)$/
 
-export const SERVER_PREFIX = 'about://React/Server/'
+const REACT_ENV_PREFIX = /^(?:about|rsc):\/\/React\/(?!Client\/)[^/]+\//
 
 export function parseFrames(stack: string): Frame[] {
   const frames: Frame[] = []
@@ -27,11 +27,21 @@ export function callSiteFrame(stack: string | null): Frame | null {
 }
 
 export function isServerFrame(frame: Frame): boolean {
-  return frame.file.startsWith(SERVER_PREFIX)
+  return REACT_ENV_PREFIX.test(frame.file)
 }
 
 export function serverFileUrl(frame: Frame): string {
-  return frame.file.slice(SERVER_PREFIX.length).replace(/\?\d+$/, '')
+  return frame.file.replace(REACT_ENV_PREFIX, '').replace(/\?\d+$/, '')
+}
+
+export function nextBasePath(scriptUrls: readonly string[], origin: string): string {
+  for (const src of scriptUrls) {
+    if (!src.startsWith(origin + '/')) continue
+    const path = src.slice(origin.length)
+    const i = path.indexOf('/_next/')
+    if (i !== -1) return path.slice(0, i)
+  }
+  return ''
 }
 
 export function projectRootFromServerFile(fileUrl: string): string | null {
