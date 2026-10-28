@@ -74,6 +74,38 @@ clip.play()
 </script></body>
 </html>`
 
+const shadowPage = () => `<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Fixture shadow</title>
+<style>body{font-family:sans-serif;margin:40px}</style></head>
+<body><h1>Shadow</h1><div id="host"></div>
+<script>
+const root = document.getElementById('host').attachShadow({ mode: 'open' })
+root.innerHTML = '<style>button{padding:8px 24px;font-size:16px;background:#0c0}</style><button id="inner" type="button">Inside shadow</button>'
+</script></body>
+</html>`
+
+const innerFramePage = () => `<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Fixture inner frame</title>
+<style>body{font-family:sans-serif;margin:8px}#plain{padding:8px 24px;font-size:16px;background:#0c0}</style></head>
+<body><button id="plain" type="button">Inside frame</button><div id="host"></div>
+<script>
+const root = document.getElementById('host').attachShadow({ mode: 'open' })
+root.innerHTML = '<style>button{padding:8px 24px;font-size:16px;background:#0c0}</style><button id="nested" type="button">Shadow inside frame</button>'
+</script></body>
+</html>`
+
+const framesPage = (foreignPort: number) => `<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Fixture frames</title>
+<style>body{font-family:sans-serif;margin:40px}iframe{display:block;width:420px;height:120px;border:2px solid #888;margin:16px 0}</style></head>
+<body><h1>Frames</h1>
+<iframe id="same" src="/inner-frame"></iframe>
+<iframe id="foreign" src="http://localhost:${foreignPort}/foreign"></iframe>
+</body>
+</html>`
+
 const motionFramesPage = () => `<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><title>Fixture motion frames</title>
@@ -93,6 +125,19 @@ const innerMotionSvg = () => `<svg xmlns="http://www.w3.org/2000/svg" width="320
 <style>@keyframes grow{from{width:20px}to{width:240px}}#bar{animation:grow 2s linear infinite alternate}</style>
 <rect id="bar" x="8" y="8" width="20" height="20" fill="#0c0"/></svg>`
 
+const foreignPage = () => `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Foreign</title></head>
+<body style="margin:8px"><button id="outside" type="button" style="padding:8px 24px;font-size:16px">Other origin</button></body>
+</html>`
+
+const foreignPort = Number(process.env.FIXTURE_FOREIGN_PORT)
+
+if (foreignPort) Bun.serve({
+  port: foreignPort,
+  hostname: 'localhost',
+  fetch: req => (new URL(req.url).pathname === '/foreign' ? new Response(foreignPage(), { headers: { 'content-type': 'text/html' } }) : new Response('not found', { status: 404 })),
+})
+
 Bun.serve({
   port,
   hostname: 'localhost',
@@ -106,6 +151,9 @@ Bun.serve({
     if (url.pathname === '/router') return new Response(routerPage(), { headers: { 'content-type': 'text/html' } })
     if (url.pathname === '/backdrop') return new Response(backdropPage(), { headers: { 'content-type': 'text/html' } })
     if (url.pathname === '/nested') return new Response(nestedPage(), { headers: { 'content-type': 'text/html' } })
+    if (url.pathname === '/shadow') return new Response(shadowPage(), { headers: { 'content-type': 'text/html' } })
+    if (url.pathname === '/inner-frame') return new Response(innerFramePage(), { headers: { 'content-type': 'text/html' } })
+    if (url.pathname === '/frames') return new Response(framesPage(foreignPort), { headers: { 'content-type': 'text/html' } })
     if (url.pathname === '/motion-frames') return new Response(motionFramesPage(), { headers: { 'content-type': 'text/html' } })
     if (url.pathname === '/inner-motion') return new Response(innerMotionPage(), { headers: { 'content-type': 'text/html' } })
     if (url.pathname === '/inner-motion.svg') return new Response(innerMotionSvg(), { headers: { 'content-type': 'image/svg+xml' } })

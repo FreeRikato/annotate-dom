@@ -1,4 +1,5 @@
 import { copyText } from './lib/clipboard'
+import { deepCandidates, frameDocument, framesIn, isSealedFrame, pagePoint, resolveDeep, topRect } from './lib/deep'
 import { freezePage } from './lib/freeze'
 import { parseSavedLevel, sendLabel, SETTINGS_KEY } from './lib/daemon'
 import { FOCUSED_ATTR, HOVERED_ATTR, MARKER_ATTR, type Reply, type Request, type Responses } from './lib/messages'
@@ -11,6 +12,7 @@ import { DETAIL_LEVELS, emptyBatch, PROJECT_ROOT_NOT_FOUND, type Batch, type Box
 
 const GLOBAL_KEY = '__annotateDomToggle'
 const DAEMON_POLL_MS = 2000
+const SEALED_FRAME_TOAST = 'Elements inside this frame cannot be picked.'
 
 async function call<K extends Request['kind']>(req: Extract<Request, { kind: K }>): Promise<Responses[K]> {
   const reply: Reply<K> = await chrome.runtime.sendMessage(req)
@@ -23,6 +25,7 @@ const CSS_TEXT = `
 .root { position: fixed; inset: 0; pointer-events: none; font: 13px/1.4 system-ui, -apple-system, sans-serif; color: #f4f4f5; }
 .hl { position: fixed; border: 2px solid #ff3b30; background: rgba(255,59,48,.08); border-radius: 2px; display: none; }
 .hl-label { position: absolute; left: -2px; top: -22px; background: #ff3b30; color: #fff; padding: 1px 6px; font-size: 11px; border-radius: 3px; white-space: nowrap; }
+.shield { position: fixed; pointer-events: auto; }
 .marker { position: fixed; width: 22px; height: 22px; margin: -11px 0 0 -11px; border-radius: 50%; background: #ff3b30; color: #fff; font-weight: 700; font-size: 12px; display: grid; place-items: center; box-shadow: 0 1px 4px rgba(0,0,0,.4); }
 .panel { position: fixed; right: 16px; bottom: 16px; width: 320px; max-height: 60vh; display: flex; flex-direction: column; background: #18181b; border: 1px solid #3f3f46; border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,.4); pointer-events: auto; overflow: hidden; }
 .head { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid #3f3f46; }
@@ -58,7 +61,7 @@ function h<K extends keyof HTMLElementTagNameMap>(tag: K, props: { className?: s
 }
 
 function boxOf(el: Element): Box {
-  const r = el.getBoundingClientRect()
+  const r = topRect(el)
   return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) }
 }
 
@@ -67,11 +70,11 @@ function nextFrame(): Promise<void> {
 }
 
 function locate(pin: Pin): Element | null {
-  try {
-    return document.querySelector(pin.inspection.selector)
-  } catch {
-    return null
-  }
+  return resolveDeep(pin.inspection.selector)
+}
+
+function isMouse(event: Event): event is MouseEvent {
+  return typeof Reflect.get(event, 'clientX') === 'number'
 }
 
 function shortFile(file: string): string {
@@ -96,6 +99,7 @@ function start(): () => void {
   const hlLabel = h('div', { className: 'hl-label' })
   hl.append(hlLabel)
   const markers = h('div')
+  const shieldLayer = h('div')
 
   const panel = h('div', { className: 'panel' })
   const head = h('div', { className: 'head' })
@@ -129,7 +133,7 @@ function start(): () => void {
   const undoBtn = h('button', { text: 'Undo' })
   toast.append(toastText, undoBtn)
 
-  root.append(hl, markers, panel, editor, toast)
+  root.append(hl, markers, shieldLayer, panel, editor, toast)
   shadow.append(style, root)
   document.documentElement.append(host)
 
@@ -150,6 +154,9 @@ function start(): () => void {
   let editing: Element | null = null
   let session: EditorSession | null = null
   const frozen = new Set<() => void>()
+  const shields = new Map<Element, HTMLElement>()
+  const watched = new WeakSet<Document>()
+  let warned: Element | null = null
   let lastPath = pageKey(location)
   let toastTimer = 0
 
@@ -204,7 +211,7 @@ function start(): () => void {
       if (pin.path !== pageKey(location)) continue
       const el = locate(pin)
       if (!el) continue
-      const r = el.getBoundingClientRect()
+      const r = topRect(el)
       const m = h('div', { className: 'marker', text: String(numberOf(pin.id)) })
       m.style.left = `${Math.max(11, r.left)}px`
       m.style.top = `${Math.max(11, r.top)}px`
@@ -217,7 +224,7 @@ function start(): () => void {
       hl.style.display = 'none'
       return
     }
-    const r = el.getBoundingClientRect()
+    const r = topRect(el)
     Object.assign(hl.style, { display: 'block', left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` })
     const id = el.id ? `#${el.id}` : ''
     const cls = el.classList.length ? `.${Array.from(el.classList).slice(0, 2).join('.')}` : ''
@@ -230,7 +237,7 @@ function start(): () => void {
 
   function ancestorsBelowBody(el: Element): Element[] {
     const chain: Element[] = []
-    for (let node: Element | null = el; node && node !== document.body && node !== document.documentElement; node = node.parentElement) chain.push(node)
+    for (let node: Element | null = el; node && node !== node.ownerDocument.body && node !== node.ownerDocument.documentElement; node = node.parentElement) chain.push(node)
     return chain
   }
 
@@ -270,7 +277,7 @@ function start(): () => void {
 
   function placeEditor(el: Element) {
     showHighlight(el)
-    const r = el.getBoundingClientRect()
+    const r = topRect(el)
     const left = Math.min(Math.max(8, r.left), innerWidth - 316)
     const below = r.bottom + 8
     const top = below + 130 < innerHeight ? below : Math.max(8, r.top - 138)
@@ -419,12 +426,15 @@ function start(): () => void {
   }
 
   function fromPage(event: Event): Element | null {
-    if (event.composedPath().includes(host)) return null
-    if (event instanceof MouseEvent) {
-      const candidates = document.elementsFromPoint(event.clientX, event.clientY)
+    const path = event.composedPath()
+    for (const [frame, shield] of shields) if (path.includes(shield)) return frame
+    if (path.includes(host)) return null
+    if (isMouse(event)) {
+      const { x, y } = pagePoint(event)
+      const candidates = deepCandidates(document, x, y, host)
       return pickTarget({ candidates, viewport: { width: innerWidth, height: innerHeight }, overlayHost: host })
     }
-    const first = event.composedPath()[0]
+    const first = path[0]
     return first instanceof Element ? first : null
   }
 
@@ -432,6 +442,9 @@ function start(): () => void {
     if (!visible || !picking || editing) return
     pointTo(fromPage(event))
     showHighlight(target, pickPosition())
+    const sealed = target && isSealedFrame(target) ? target : null
+    if (sealed && sealed !== warned) setToast(SEALED_FRAME_TOAST, false)
+    warned = sealed
   }
 
   function onWheel(event: WheelEvent) {
@@ -466,6 +479,10 @@ function start(): () => void {
     const el = walking && target ? target : hit
     event.preventDefault()
     event.stopImmediatePropagation()
+    if (isSealedFrame(el)) {
+      setToast(SEALED_FRAME_TOAST, false)
+      return
+    }
     if (event.shiftKey) {
       void quickGrab(el)
       return
@@ -555,15 +572,41 @@ function start(): () => void {
     renderList()
   })
 
-  const opts = { capture: true }
-  window.addEventListener('mousemove', onMove, opts)
-  for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'dblclick', 'auxclick']) {
-    window.addEventListener(type, swallow, opts)
+  function listenIn(win: Window) {
+    const opts = { capture: true }
+    win.addEventListener('mousemove', onMove, opts)
+    for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'dblclick', 'auxclick']) {
+      win.addEventListener(type, swallow, opts)
+    }
+    win.addEventListener('click', onClick, opts)
+    win.addEventListener('keydown', onKey, opts)
+    win.addEventListener('keyup', onKeyUp, opts)
+    win.addEventListener('wheel', onWheel, { capture: true, passive: false })
   }
-  window.addEventListener('click', onClick, opts)
-  window.addEventListener('keydown', onKey, opts)
-  window.addEventListener('keyup', onKeyUp, opts)
-  window.addEventListener('wheel', onWheel, { capture: true, passive: false })
+  listenIn(window)
+
+  function syncFrames() {
+    const sealed = new Set<Element>()
+    for (const frame of picking && !editing ? framesIn(document) : []) {
+      const inner = frameDocument(frame)
+      if (!inner) sealed.add(frame)
+      else if (inner.defaultView && !watched.has(inner)) {
+        watched.add(inner)
+        listenIn(inner.defaultView)
+      }
+    }
+    for (const [frame, shield] of shields) {
+      if (sealed.has(frame)) continue
+      shield.remove()
+      shields.delete(frame)
+    }
+    for (const frame of sealed) {
+      const shield = shields.get(frame) ?? shieldLayer.appendChild(h('div', { className: 'shield' }))
+      shields.set(frame, shield)
+      const r = topRect(frame)
+      Object.assign(shield.style, { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` })
+    }
+  }
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) for (const release of [...frozen]) release()
   })
@@ -576,6 +619,7 @@ function start(): () => void {
         renderList()
       }
       renderMarkers()
+      syncFrames()
       if (editing) showHighlight(editing)
       else if (picking && target) showHighlight(target, pickPosition())
     }
