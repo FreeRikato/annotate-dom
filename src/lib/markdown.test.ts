@@ -378,3 +378,131 @@ describe('toMarkdown detail levels', () => {
     }
   })
 })
+
+describe('toMarkdown box model and default styles', () => {
+  const single = (ins: Inspection, level?: 'compact' | 'standard' | 'forensic') => toMarkdown({
+    origin: 'http://localhost:3000',
+    createdAt: 0,
+    level,
+    pages: [{ path: '/p', url: 'http://localhost:3000/p', viewportFile: null, pins: [{ pin: { ...pin('a', '/p', 'n'), inspection: ins }, cropFile: null }] }],
+  })
+
+  it('prints margin, padding and border per side on one Box model line, with no shorthand in Styles', () => {
+    const md = single({
+      ...inspection,
+      styles: { display: 'flex', margin: '0px 8px', padding: '4px 12px', border: '1px solid red', color: 'red' },
+      boxModel: { margin: [0, 8, 0, 8], padding: [4, 12, 4, 12], border: [1, 1, 1, 1] },
+    })
+    expect(md).toContain('- Box model: margin 0 8 0 8, padding 4 12 4 12, border 1 1 1 1\n')
+    expect(md).toContain('- Styles: display: flex; border: 1px solid red; color: red\n')
+  })
+
+  it('prints no Box model line and keeps the shorthand for a pin captured without one', () => {
+    const md = single({ ...inspection, styles: { display: 'flex', padding: '4px 12px' } })
+    expect(md).not.toContain('Box model')
+    expect(md).toContain('- Styles: display: flex; padding: 4px 12px\n')
+  })
+
+  it('drops gap on a parent that is neither flex nor grid', () => {
+    expect(single({ ...inspection, ancestors: [{ selector: 'div.p', styles: { display: 'block', gap: '8px' } }] })).toContain('  - `div.p`: display: block\n')
+  })
+
+  const defaults = {
+    position: 'static', opacity: '1', visibility: 'visible', 'z-index': 'auto', 'background-color': 'transparent',
+    'box-shadow': 'none', 'border-radius': '0px', overflow: 'visible', gap: 'normal', 'pointer-events': 'auto', cursor: 'auto',
+  }
+
+  for (const [prop, value] of Object.entries(defaults)) {
+    it(`drops ${prop}: ${value}`, () => {
+      const md = single({ ...inspection, styles: { display: 'block', [prop]: value } })
+      expect(md).toContain('- Styles: display: block\n')
+    })
+  }
+
+  it('drops a zero-width none border whatever its colour, on the pin and on a parent', () => {
+    expect(single({ ...inspection, styles: { display: 'block', border: '0px none rgb(0, 0, 0)' } })).toContain('- Styles: display: block\n')
+    expect(parent({ display: 'block', border: '0px none rgb(255, 0, 0)' })).toContain('  - `div.p`: display: block\n')
+  })
+
+  it('drops a zero-width border whatever its style and colour, on the pin and on a parent', () => {
+    const tailwind = '0px solid rgb(233, 233, 233)'
+    expect(single({ ...inspection, styles: { display: 'block', border: tailwind } })).toContain('- Styles: display: block\n')
+    expect(parent({ display: 'block', border: tailwind })).toContain('  - `div.p`: display: block\n')
+  })
+
+  it('drops the normal alignment defaults and the flex keys of a block heading', () => {
+    const heading = {
+      'align-items': 'normal', border: '0px solid rgb(233, 233, 233)', color: 'rgb(24, 24, 24)', display: 'block', 'flex-direction': 'row',
+      'font-size': '18px', 'justify-content': 'normal', 'text-align': 'center',
+    }
+    expect(single({ ...inspection, styles: heading })).toContain('- Styles: color: rgb(24, 24, 24); display: block; font-size: 18px; text-align: center\n')
+  })
+
+  it('keeps the flex keys of a flex container and drops normal values', () => {
+    const flex = { display: 'flex', 'flex-direction': 'row', 'justify-content': 'center', 'align-items': 'normal' }
+    expect(single({ ...inspection, styles: flex })).toContain('- Styles: display: flex; flex-direction: row; justify-content: center\n')
+  })
+
+  it('drops grid keys on a pin that is not a grid and keeps them on one that is', () => {
+    const keys = { 'grid-template-columns': '1fr 1fr' }
+    expect(single({ ...inspection, styles: { display: 'block', ...keys } })).toContain('- Styles: display: block\n')
+    expect(single({ ...inspection, styles: { display: 'grid', ...keys } })).toContain('- Styles: display: grid; grid-template-columns: 1fr 1fr\n')
+  })
+
+  it('keeps alignment keys on grid containers but not flex-direction', () => {
+    const keys = { 'flex-direction': 'column', 'align-items': 'center', 'justify-content': 'space-between' }
+    const expected = 'display: grid; align-items: center; justify-content: space-between'
+    expect(single({ ...inspection, styles: { display: 'grid', ...keys } })).toContain(`- Styles: ${expected}\n`)
+    expect(single({ ...inspection, ancestors: [{ selector: 'div.p', styles: { display: 'inline-grid', ...keys } }] })).toContain('  - `div.p`: display: inline-grid; align-items: center; justify-content: space-between\n')
+  })
+
+  it('keeps a real border', () => {
+    expect(single({ ...inspection, styles: { display: 'block', border: '2px dashed rgb(255, 0, 0)' } })).toContain('- Styles: display: block; border: 2px dashed rgb(255, 0, 0)\n')
+  })
+
+  it('drops a fully transparent rgba background and keeps non-default values', () => {
+    const md = single({ ...inspection, styles: { 'background-color': 'rgba(0, 0, 0, 0)', position: 'absolute', opacity: '0.5', cursor: 'pointer' } })
+    expect(md).toContain('- Styles: position: absolute; opacity: 0.5; cursor: pointer\n')
+  })
+
+  it('omits the Styles line when every style is a default', () => {
+    expect(single({ ...inspection, styles: { position: 'static', opacity: '1' } })).not.toContain('- Styles:')
+  })
+
+  const parent = (styles: Record<string, string>) => single({ ...inspection, ancestors: [{ selector: 'div.p', styles }] })
+
+  it('prints flex keys for flex and inline-flex parents only', () => {
+    const keys = { 'flex-direction': 'column', 'justify-content': 'center', 'align-items': 'center', 'grid-template-columns': '1fr 1fr' }
+    expect(parent({ display: 'flex', ...keys })).toContain('  - `div.p`: display: flex; flex-direction: column; justify-content: center; align-items: center\n')
+    expect(parent({ display: 'inline-flex', ...keys })).toContain('display: inline-flex; flex-direction: column')
+    expect(parent({ display: 'block', ...keys })).toContain('  - `div.p`: display: block\n')
+  })
+
+  it('prints grid keys for grid and inline-grid parents only', () => {
+    const keys = { 'flex-direction': 'row', 'grid-template-columns': '1fr 1fr', gap: '8px' }
+    expect(parent({ display: 'grid', ...keys })).toContain('  - `div.p`: display: grid; grid-template-columns: 1fr 1fr; gap: 8px\n')
+    expect(parent({ display: 'inline-grid', ...keys })).toContain('display: inline-grid; grid-template-columns: 1fr 1fr')
+    expect(parent({ display: 'block', ...keys })).toContain('  - `div.p`: display: block\n')
+  })
+
+  it('drops default values on a parent', () => {
+    expect(parent({ display: 'block', position: 'static', overflow: 'visible', width: '300px' })).toContain('  - `div.p`: display: block; width: 300px\n')
+  })
+
+  it('is not longer for the single-pin fixture than the previous format', () => {
+    const raw = {
+      display: 'inline-flex', position: 'static', width: '96px', height: '36px', margin: '0px 8px', padding: '4px 12px', color: 'rgb(255, 255, 255)',
+      'background-color': 'rgba(0, 0, 0, 0)', border: '1px solid rgb(0, 0, 0)', 'border-radius': '0px', 'box-shadow': 'none', opacity: '1',
+      visibility: 'visible', 'z-index': 'auto', overflow: 'visible', cursor: 'auto', 'pointer-events': 'auto', gap: 'normal',
+    }
+    const md = single({
+      ...inspection,
+      styles: raw,
+      boxModel: { margin: [0, 8, 0, 8], padding: [4, 12, 4, 12], border: [1, 1, 1, 1] },
+      ancestors: [{ selector: 'form.grid', styles: { display: 'block', position: 'static', 'flex-direction': 'row', 'justify-content': 'normal', 'align-items': 'normal', gap: 'normal', 'grid-template-columns': 'none', overflow: 'visible' } }],
+    })
+    const BEFORE = 1591
+    console.log(`single-pin standard export length: before ${BEFORE}, after ${md.length}`)
+    expect(md.length).toBeLessThanOrEqual(BEFORE)
+  })
+})

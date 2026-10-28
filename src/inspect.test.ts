@@ -30,6 +30,11 @@ function itemForm() {
 }
 
 describe('inspectElement', () => {
+  it('records margin, padding and border width as four numbers each, top right bottom left', () => {
+    document.body.innerHTML = '<div data-annotate-dom-target="bm1" style="margin: 0 8px; padding: 4px 12px; border: 1px solid red; border-left-width: 3px">x</div>'
+    expect(runInPage('bm1')?.boxModel).toEqual({ margin: [0, 8, 0, 8], padding: [4, 12, 4, 12], border: [1, 1, 1, 3] })
+  })
+
   it('collects DOM, React owners, redacted props and hook state', () => {
     document.body.innerHTML = `
       <main style="display:flex">

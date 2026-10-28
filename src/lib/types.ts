@@ -74,6 +74,10 @@ export type Accessibility = {
   readonly violations: readonly AxeViolation[]
 }
 
+export type Sides = readonly [top: number, right: number, bottom: number, left: number]
+
+export type BoxModel = { readonly margin: Sides; readonly padding: Sides; readonly border: Sides }
+
 export type DetailLevel = 'compact' | 'standard' | 'forensic'
 
 export const DETAIL_LEVELS: readonly DetailLevel[] = ['compact', 'standard', 'forensic']
@@ -89,6 +93,7 @@ export type Inspection = {
   readonly htmlTruncated: boolean
   readonly text: string
   readonly box: Box
+  readonly boxModel?: BoxModel
   readonly styles: Readonly<Record<string, string>>
   readonly attributes: Readonly<Record<string, string>>
   readonly ancestors: readonly Ancestor[]

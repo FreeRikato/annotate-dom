@@ -1,6 +1,6 @@
 import type {
-  Accessibility, Ancestor, AxeViolation, ConsoleEvent, DesignTokens, Inspection, Interaction, NetworkEvent, OwnerSnapshot, QuerySnapshot, RecordedConsole,
-  RecordedRequest, TokenValue,
+  Accessibility, Ancestor, AxeViolation, BoxModel, ConsoleEvent, DesignTokens, Inspection, Interaction, NetworkEvent, OwnerSnapshot, QuerySnapshot, RecordedConsole,
+  RecordedRequest, Sides, TokenValue,
 } from './lib/types'
 
 export function inspectElement(marker: string): Inspection | null {
@@ -197,6 +197,19 @@ export function inspectElement(marker: string): Inspection | null {
     const out: Record<string, string> = {}
     for (const k of keys) out[k] = computed.getPropertyValue(k)
     return out
+  }
+
+  function boxModelOf(node: Element): BoxModel {
+    const computed = getComputedStyle(node)
+    const sides = (property: (side: string) => string): Sides => {
+      const width = (side: string) => parseFloat(computed.getPropertyValue(property(side))) || 0
+      return [width('top'), width('right'), width('bottom'), width('left')]
+    }
+    return {
+      margin: sides(side => `margin-${side}`),
+      padding: sides(side => `padding-${side}`),
+      border: sides(side => `border-${side}-width`),
+    }
   }
 
   function attributes(node: Element): Record<string, string> {
@@ -440,6 +453,7 @@ export function inspectElement(marker: string): Inspection | null {
     htmlTruncated: html.length > HTML_LIMIT,
     text: el instanceof HTMLElement ? el.innerText.trim().slice(0, 300) : '',
     box: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) },
+    boxModel: boxModelOf(el),
     styles: pick(el, STYLE_KEYS),
     attributes: attributes(el),
     ancestors,

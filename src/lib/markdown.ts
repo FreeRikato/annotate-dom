@@ -1,5 +1,5 @@
 import { classifySourcePath } from './callsites'
-import type { DetailLevel, Pin, SourceLoc } from './types'
+import type { BoxModel, DetailLevel, Pin, SourceLoc } from './types'
 
 export type Excerpt = { readonly file: string; readonly line: number; readonly startLine: number; readonly code: string }
 
@@ -31,11 +31,46 @@ function code(text: string): string {
   return text.includes('`') ? `\`\` ${text} \`\`` : `\`${text}\``
 }
 
-function styleLine(styles: Readonly<Record<string, string>>): string {
+const DEFAULT_STYLES: Readonly<Record<string, readonly string[]>> = {
+  position: ['static'],
+  opacity: ['1'],
+  visibility: ['visible'],
+  'z-index': ['auto'],
+  'background-color': ['transparent', 'rgba(0, 0, 0, 0)'],
+  'box-shadow': ['none'],
+  'border-radius': ['0px'],
+  overflow: ['visible'],
+  gap: ['normal'],
+  'align-items': ['normal'],
+  'justify-content': ['normal'],
+  'pointer-events': ['auto'],
+  cursor: ['auto'],
+}
+
+const ZERO_WIDTH_BORDER = /^0px\b/
+
+function isDefaultStyle(key: string, value: string): boolean {
+  return DEFAULT_STYLES[key]?.includes(value) === true || (key === 'border' && ZERO_WIDTH_BORDER.test(value))
+}
+
+const BOX_SHORTHANDS = ['margin', 'padding']
+const FLEX_KEYS = ['flex-direction']
+const ALIGN_KEYS = ['justify-content', 'align-items']
+const GRID_KEYS = ['grid-template-columns']
+
+function styleLine(styles: Readonly<Record<string, string>>, skip: (key: string) => boolean = () => false): string {
+  const display = styles.display ?? ''
+  const flex = display === 'flex' || display === 'inline-flex'
+  const grid = display === 'grid' || display === 'inline-grid'
+  const notApplicable = (k: string) => (FLEX_KEYS.includes(k) && !flex) || (ALIGN_KEYS.includes(k) && !flex && !grid) || (GRID_KEYS.includes(k) && !grid) || (k === 'gap' && !flex && !grid)
   return Object.entries(styles)
-    .filter(([, v]) => v !== '')
+    .filter(([k, v]) => v !== '' && !isDefaultStyle(k, v) && !notApplicable(k) && !skip(k))
     .map(([k, v]) => `${k}: ${v}`)
     .join('; ')
+}
+
+function boxModelLine({ margin, padding, border }: BoxModel): string {
+  return `- Box model: margin ${margin.join(' ')}, padding ${padding.join(' ')}, border ${border.join(' ')}`
 }
 
 function stamp(ms: number): string {
@@ -88,7 +123,9 @@ function pinSection({ pin, cropFile, excerpts = [] }: ExportPin, n: number): str
   }
   if (ins.text) lines.push(`- Text: ${code(ins.text.replace(/\s+/g, ' '))}`)
   lines.push(`- Box: x=${ins.box.x} y=${ins.box.y} w=${ins.box.w} h=${ins.box.h}`)
-  lines.push(`- Styles: ${styleLine(ins.styles)}`)
+  if (ins.boxModel) lines.push(boxModelLine(ins.boxModel))
+  const styles = styleLine(ins.styles, k => ins.boxModel !== undefined && BOX_SHORTHANDS.includes(k))
+  if (styles) lines.push(`- Styles: ${styles}`)
   const attrs = Object.entries(ins.attributes).map(([k, v]) => `${k}=${JSON.stringify(v)}`)
   if (attrs.length) lines.push(`- Attributes: ${attrs.join(', ')}`)
   for (const owner of owners) {
