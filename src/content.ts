@@ -241,12 +241,16 @@ function start(): () => void {
     return candidate && candidate !== document.body && candidate !== document.documentElement && candidate !== host ? candidate : null
   }
 
-  function openEditor(el: Element) {
-    editing = el
-    pinContext = {
+  function readPinContext() {
+    return {
       focused: appElement(document.activeElement),
       hovered: appElement(Array.from(document.querySelectorAll(':hover')).filter(node => node !== host).at(-1)),
     }
+  }
+
+  function openEditor(el: Element) {
+    editing = el
+    pinContext = readPinContext()
     const selection = getSelection()
     pinSelection = selection && selection.rangeCount > 0 ? selection.getRangeAt(0).cloneRange() : null
     showHighlight(el)
@@ -272,31 +276,34 @@ function start(): () => void {
     showHighlight(null)
   }
 
+  async function inspectPinned(el: Element, id: string, { focused, hovered }: typeof pinContext) {
+    el.setAttribute(MARKER_ATTR, id)
+    focused?.setAttribute(FOCUSED_ATTR, '')
+    hovered?.setAttribute(HOVERED_ATTR, '')
+    let inspection
+    try {
+      inspection = await call({ kind: 'inspect', marker: id })
+    } finally {
+      el.removeAttribute(MARKER_ATTR)
+      focused?.removeAttribute(FOCUSED_ATTR)
+      hovered?.removeAttribute(HOVERED_ATTR)
+    }
+    if (!inspection) throw new Error('Element is gone')
+    const [elementSite, ...ownerSites] = await resolver.resolveAll([
+      callSiteFrame(inspection.react?.elementStack ?? null),
+      ...(inspection.react?.owners ?? []).map(o => callSiteFrame(o.stack)),
+    ])
+    const selected = withSelectedCallSites(inspection, ownerSites)
+    return { inspection: selected.inspection, elementSite: elementSite ?? null, callSites: selected.callSites }
+  }
+
   async function savePin(el: Element, note: string) {
     busy = true
     renderList()
     const id = crypto.randomUUID()
     try {
       restoreSelection(pinSelection)
-      el.setAttribute(MARKER_ATTR, id)
-      const { focused, hovered } = pinContext
-      focused?.setAttribute(FOCUSED_ATTR, '')
-      hovered?.setAttribute(HOVERED_ATTR, '')
-      let inspection
-      try {
-        inspection = await call({ kind: 'inspect', marker: id })
-      } finally {
-        el.removeAttribute(MARKER_ATTR)
-        focused?.removeAttribute(FOCUSED_ATTR)
-        hovered?.removeAttribute(HOVERED_ATTR)
-      }
-      if (!inspection) throw new Error('Element is gone')
-      const [elementSite, ...ownerSites] = await resolver.resolveAll([
-        callSiteFrame(inspection.react?.elementStack ?? null),
-        ...(inspection.react?.owners ?? []).map(o => callSiteFrame(o.stack)),
-      ])
-      const selected = withSelectedCallSites(inspection, ownerSites)
-      inspection = selected.inspection
+      const { inspection, elementSite, callSites } = await inspectPinned(el, id, pinContext)
 
       host.style.visibility = 'hidden'
       await nextFrame()
@@ -321,8 +328,8 @@ function start(): () => void {
         note,
         createdAt: Date.now(),
         inspection,
-        elementSite: elementSite ?? null,
-        callSites: selected.callSites,
+        elementSite,
+        callSites,
         crop: shot.crop,
       }
       batch = await call({ kind: 'add-pin', pin, viewport: shot.viewport, dpr: shot.dpr, rects })
@@ -331,6 +338,28 @@ function start(): () => void {
     } finally {
       busy = false
       renderList()
+    }
+  }
+
+  async function quickGrab(el: Element) {
+    resetWalk()
+    showHighlight(null)
+    try {
+      const id = crypto.randomUUID()
+      const { inspection, elementSite, callSites } = await inspectPinned(el, id, readPinContext())
+      const pin: Pin = { id, path: pageKey(location), url: location.href, note: '', createdAt: Date.now(), inspection, elementSite, callSites, crop: '' }
+      const { markdown } = await call({ kind: 'quick-grab', pin, origin: location.origin })
+      if ((await copyText(markdown)) === 'clipboard') {
+        fallback.style.display = 'none'
+        setToast(`Copied ${inspection.selector}`, false)
+      } else {
+        fallbackText.value = markdown
+        fallback.style.display = 'block'
+        fallbackText.select()
+        setToast('Clipboard blocked; markdown is in the panel.', false)
+      }
+    } catch (err: unknown) {
+      setToast(`Could not copy: ${err instanceof Error ? err.message : String(err)}`, false)
     }
   }
 
@@ -382,6 +411,10 @@ function start(): () => void {
     const el = walking && target ? target : hit
     event.preventDefault()
     event.stopImmediatePropagation()
+    if (event.shiftKey) {
+      void quickGrab(el)
+      return
+    }
     resetWalk()
     openEditor(el)
   }

@@ -318,6 +318,10 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
       })
     case 'export':
       return withTab(tabId, () => exportBatch({ tabId, origin: req.origin }))
+    case 'quick-grab': {
+      const page = { path: req.pin.path, url: req.pin.url, viewportFile: null, pins: [{ pin: req.pin, cropFile: null }] }
+      return { markdown: toMarkdown({ origin: req.origin, createdAt: req.pin.createdAt, pages: [page], level: await savedLevel() }) }
+    }
     case 'daemon-status':
       return { connected: daemon.isConnected() }
     case 'send':

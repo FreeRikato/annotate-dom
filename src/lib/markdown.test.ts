@@ -328,6 +328,31 @@ describe('toMarkdown detail levels', () => {
     }
   })
 
+  describe('note-less entry', () => {
+    const grab = (level: DetailLevel) => toMarkdown({
+      origin: 'http://localhost:3000',
+      createdAt: new Date(2026, 9, 26, 14, 2).getTime(),
+      pages: [{ path: '/inventory/new', url: 'http://localhost:3000/inventory/new', viewportFile: null, pins: [{ pin: pin('g', '/inventory/new', ''), cropFile: null }] }],
+      level,
+    })
+
+    it('uses the selector as the heading in standard and forensic', () => {
+      for (const level of ['standard', 'forensic'] as const) {
+        const md = grab(level)
+        expect(md).toContain('### form > button[type="submit"]\n')
+        expect(md).not.toContain('### 1.')
+      }
+    })
+
+    it('prints the selector heading, then the selector and source with no trailing colon in compact', () => {
+      expect(grab('compact')).toContain('### form > button[type="submit"]\n1. **form > button[type="submit"]** (/app/components/ui/button.tsx:58)\n')
+    })
+
+    it('keeps compact entries with a note free of the selector heading', () => {
+      expect(toMarkdown({ ...batch(1), level: 'compact' })).not.toContain('###')
+    })
+  })
+
   describe('selected text', () => {
     const withSelection = (level?: DetailLevel) => {
       const base = batch(1)

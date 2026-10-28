@@ -86,7 +86,7 @@ function secondsBefore(offsetMs: number): string {
 function pinSection({ pin, cropFile, excerpts = [] }: ExportPin, n: number): string[] {
   const { inspection: ins } = pin
   const owners = ins.react?.owners ?? []
-  const lines = [`### ${n}. ${pin.note.split('\n')[0]}`]
+  const lines = [pin.note ? `### ${n}. ${pin.note.split('\n')[0]}` : `### ${ins.selector}`]
   if (pin.note.includes('\n')) lines.push('', pin.note, '')
   lines.push(`- Screenshot: ${cropFile ?? 'not saved'}`)
   if (ins.react) {
@@ -170,8 +170,10 @@ function selectedTextLine(text: string): string {
 function compactLine({ pin }: ExportPin, n: number): string[] {
   const site = pin.elementSite
   const { selectedText } = pin.inspection
-  const line = `${n}. **${pin.inspection.selector}** (${site ? `${site.file}:${site.line}` : 'no source'}): ${pin.note.split('\n')[0]}`
-  return selectedText ? [line, selectedTextLine(selectedText)] : [line]
+  const where = `${n}. **${pin.inspection.selector}** (${site ? `${site.file}:${site.line}` : 'no source'})`
+  const line = pin.note ? `${where}: ${pin.note.split('\n')[0]}` : where
+  const heading = pin.note ? [] : [`### ${pin.inspection.selector}`]
+  return [...heading, line, ...(selectedText ? [selectedTextLine(selectedText)] : [])]
 }
 
 function environment(page: ExportPage): string[] {
