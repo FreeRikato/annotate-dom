@@ -58,7 +58,7 @@ test('pins the login theme toggle and copies markdown with resolved React source
   expect(markdown).toMatch(new RegExp(`\`<Button>\` at ${APP_ROOT}/components/theme-toggle\\.tsx:12:\\d+`))
   expect(markdown).toMatch(new RegExp(`\`<ThemeToggle>\` at ${APP_ROOT}/app/login/page\\.tsx:19:\\d+`))
   expect(markdown).toContain('- Components: LoginPage > ThemeToggle > Button')
-  expect(markdown).toContain('`<LoginPage>` (server component) at library code (next/dist/')
+  expect(markdown).toMatch(new RegExp(`\`<LoginPage>\` \\(server component\\) (in next|at ${APP_ROOT}/app/login/page\\.tsx:\\d+:\\d+)`))
   expect(markdown).toContain('- Props of Button: ')
 
   const files = [...markdown.matchAll(/screenshot[^:]*: (\/\S+)/gi)].map(m => m[1])
@@ -70,6 +70,37 @@ test('pins the login theme toggle and copies markdown with resolved React source
     expect(readFileSync(file).subarray(1, 4).toString()).toBe('PNG')
     copyFileSync(file, join(saved, `${i}.png`))
   }
+
+  await context.close()
+})
+
+test('saves a pin within 10 seconds while the dev server never answers stack-frame requests', async () => {
+  const context = await chromium.launchPersistentContext(mkdtempSync(join(tmpdir(), 'annotate-dom-')), {
+    channel: 'chromium',
+    headless: true,
+    viewport: { width: 1280, height: 800 },
+    args: [`--disable-extensions-except=${EXTENSION}`, `--load-extension=${EXTENSION}`],
+  })
+  await context.route('**/__nextjs_original-stack-frames', () => new Promise<void>(() => {}))
+  const worker = context.serviceWorkers()[0] ?? (await context.waitForEvent('serviceworker'))
+  const page = await context.newPage()
+  await page.goto(`${APP_URL}/login`)
+  const toggle = page.locator('button[data-size="icon"]').first()
+  await expect.poll(() => toggle.evaluate(el => Object.keys(el).some(k => k.startsWith('__reactFiber$')))).toBe(true)
+  await worker.evaluate(async () => {
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true })
+    const toggleOverlay: unknown = Reflect.get(globalThis, 'annotateDomToggle')
+    if (typeof toggleOverlay === 'function') await toggleOverlay(tab)
+  })
+  const overlay = page.locator('annotate-dom-root')
+  await expect(overlay.locator('.panel')).toBeVisible()
+
+  await toggle.click()
+  await overlay.locator('.editor textarea').fill('hung dev server')
+  const startedAt = Date.now()
+  await overlay.locator('.editor textarea').press('Enter')
+  await expect(overlay.locator('.title')).toHaveText('annotate-dom (1)', { timeout: 10_000 })
+  expect(Date.now() - startedAt).toBeLessThan(10_000)
 
   await context.close()
 })

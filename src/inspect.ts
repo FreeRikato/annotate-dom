@@ -19,10 +19,10 @@ export function inspectElement(marker: string): Inspection | null {
   const FOCUSED_ATTR = 'data-annotate-dom-focused'
   const HOVERED_ATTR = 'data-annotate-dom-hovered'
   const SECRET = /token|secret|password|key|session|auth|cookie/i
+  const JWT = /^eyJ[\w-]*\.[\w-]*\.[\w-]*$/
   const HTML_LIMIT = 10000
   const PROPS_LIMIT = 2000
-  const MAX_OWNERS = 6
-  const OWNERS_WITH_DATA = 3
+  const MAX_OWNERS = 20
   const RECORDER_KEY = '__annotateDomRecorder'
   const MAX_QUERIES = 20
   const MAX_SHAPE_KEYS = 10
@@ -60,11 +60,17 @@ export function inspectElement(marker: string): Inspection | null {
     return 'Anonymous'
   }
 
-  function serialize(value: unknown, depth: number): unknown {
+  const typedPasswords = new Set(
+    Array.from(document.querySelectorAll('input[type="password"]'), input => (input instanceof HTMLInputElement ? input.value : '')).filter(v => v !== ''),
+  )
+
+  function serialize(value: unknown, depth: number, hideKeylessStrings = false): unknown {
     switch (typeof value) {
       case 'undefined':
         return '[undefined]'
       case 'string':
+        if (hideKeylessStrings) return '[string]'
+        if (typedPasswords.has(value) || JWT.test(value)) return '[redacted]'
         return value.length > 200 ? `${value.slice(0, 200)}...(+${value.length - 200} chars)` : value
       case 'number':
       case 'boolean':
@@ -86,7 +92,7 @@ export function inspectElement(marker: string): Inspection | null {
     if ('$$typeof' in value) return `<${typeName(value.type)} />`
     if (depth >= 2) return Array.isArray(value) ? `[Array(${value.length})]` : '[Object]'
     if (Array.isArray(value)) {
-      const items = value.slice(0, 5).map(v => serialize(v, depth + 1))
+      const items = value.slice(0, 5).map(v => serialize(v, depth + 1, hideKeylessStrings))
       if (value.length > 5) items.push(`...(+${value.length - 5} more)`)
       return items
     }
@@ -95,8 +101,8 @@ export function inspectElement(marker: string): Inspection | null {
     return out
   }
 
-  function toJson(value: unknown): string {
-    const json = JSON.stringify(serialize(value, 0)) ?? 'null'
+  function toJson(value: unknown, hideKeylessStrings = false): string {
+    const json = JSON.stringify(serialize(value, 0, hideKeylessStrings)) ?? 'null'
     return json.length > PROPS_LIMIT ? `${json.slice(0, PROPS_LIMIT)}...(truncated)` : json
   }
 
@@ -118,21 +124,20 @@ export function inspectElement(marker: string): Inspection | null {
       if (isRecord(queue) && 'lastRenderedReducer' in queue) values.push(hook.memoizedState)
       hook = hook.next
     }
-    return values.length ? toJson(values) : null
+    return values.length ? toJson(values, true) : null
   }
 
   function owners(start: unknown): OwnerSnapshot[] {
     const out: OwnerSnapshot[] = []
     let node = start
     while (isRecord(node) && out.length < MAX_OWNERS) {
-      const withData = out.length < OWNERS_WITH_DATA
       if (typeof node.tag === 'number') {
         out.push({
           name: typeName(node.type),
           env: 'client',
           stack: stackOf(node._debugStack),
-          props: withData ? toJson(node.memoizedProps) : null,
-          state: withData ? hookState(node) : null,
+          props: toJson(node.memoizedProps),
+          state: hookState(node),
         })
         node = node._debugOwner
       } else {
@@ -140,7 +145,7 @@ export function inspectElement(marker: string): Inspection | null {
           name: typeof node.name === 'string' ? node.name : 'Anonymous',
           env: 'server',
           stack: stackOf(node.debugStack),
-          props: withData && node.props !== undefined ? toJson(node.props) : null,
+          props: node.props !== undefined ? toJson(node.props) : null,
           state: null,
         })
         node = node.owner

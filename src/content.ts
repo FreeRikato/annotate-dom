@@ -1,8 +1,10 @@
+import { copyText } from './lib/clipboard'
 import { sendLabel } from './lib/daemon'
 import { FOCUSED_ATTR, HOVERED_ATTR, MARKER_ATTR, type Reply, type Request, type Responses } from './lib/messages'
+import { withSelectedCallSites } from './lib/callsites'
 import { createResolver } from './lib/resolve'
-import { callSiteFrame } from './lib/stack'
-import { emptyBatch, PROJECT_ROOT_NOT_FOUND, type Batch, type Box, type CallSite, type Pin } from './lib/types'
+import { callSiteFrame, nextBasePath } from './lib/stack'
+import { emptyBatch, PROJECT_ROOT_NOT_FOUND, type Batch, type Box, type Pin } from './lib/types'
 
 const GLOBAL_KEY = '__annotateDomToggle'
 const DAEMON_POLL_MS = 2000
@@ -113,7 +115,11 @@ function start(): () => void {
   shadow.append(style, root)
   document.documentElement.append(host)
 
-  const resolver = createResolver({ pageOrigin: location.origin, fetcher: (url, init) => fetch(url, init) })
+  const resolver = createResolver({
+    pageOrigin: location.origin,
+    fetcher: (url, init) => fetch(url, init),
+    basePath: nextBasePath([...document.scripts].map(s => s.src), location.origin),
+  })
   let batch: Batch = emptyBatch
   let visible = true
   let picking = true
@@ -240,12 +246,12 @@ function start(): () => void {
         hovered?.removeAttribute(HOVERED_ATTR)
       }
       if (!inspection) throw new Error('Element is gone')
-      const owners = inspection.react?.owners ?? []
-      const [elementSite, ...ownerSites] = await Promise.all([
-        resolver.resolve(callSiteFrame(inspection.react?.elementStack ?? null)),
-        ...owners.map(o => resolver.resolve(callSiteFrame(o.stack))),
+      const [elementSite, ...ownerSites] = await resolver.resolveAll([
+        callSiteFrame(inspection.react?.elementStack ?? null),
+        ...(inspection.react?.owners ?? []).map(o => callSiteFrame(o.stack)),
       ])
-      const callSites: CallSite[] = owners.map((o, i) => ({ name: o.name, loc: ownerSites[i] ?? null }))
+      const selected = withSelectedCallSites(inspection, ownerSites)
+      inspection = selected.inspection
 
       host.style.visibility = 'hidden'
       await nextFrame()
@@ -271,7 +277,7 @@ function start(): () => void {
         createdAt: Date.now(),
         inspection,
         elementSite: elementSite ?? null,
-        callSites,
+        callSites: selected.callSites,
         crop: shot.crop,
       }
       batch = await call({ kind: 'add-pin', pin, viewport: shot.viewport, dpr: shot.dpr, rects })
@@ -354,15 +360,17 @@ function start(): () => void {
     try {
       const { count, folder, prompt } = await call({ kind: 'send', origin: location.origin })
       batch = emptyBatch
-      try {
-        await navigator.clipboard.writeText(prompt)
+      const delivered = await copyText(prompt)
+      const sent = `Sent ${count} annotation${count === 1 ? '' : 's'} to .annotations/${folder}/`
+      if (delivered === 'clipboard') {
         fallback.style.display = 'none'
-      } catch {
+        setToast(sent, false)
+      } else {
         fallbackText.value = prompt
         fallback.style.display = 'block'
         fallbackText.select()
+        setToast(`${sent}; clipboard blocked, prompt is in the panel.`, false)
       }
-      setToast(`Sent ${count} annotation${count === 1 ? '' : 's'} to .annotations/${folder}/`, false)
     } catch (err: unknown) {
       busy = false
       if (err instanceof Error && err.message === PROJECT_ROOT_NOT_FOUND) return copyAll()
@@ -379,11 +387,10 @@ function start(): () => void {
     try {
       const { markdown, count } = await call({ kind: 'export', origin: location.origin })
       batch = emptyBatch
-      try {
-        await navigator.clipboard.writeText(markdown)
+      if ((await copyText(markdown)) === 'clipboard') {
         fallback.style.display = 'none'
         setToast(`Copied ${count} annotation${count === 1 ? '' : 's'} to the clipboard.`, true)
-      } catch {
+      } else {
         fallbackText.value = markdown
         fallback.style.display = 'block'
         fallbackText.select()

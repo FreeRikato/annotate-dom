@@ -1,3 +1,4 @@
+import { classifySourcePath } from './callsites'
 import type { Pin, SourceLoc } from './types'
 
 export type Excerpt = { readonly file: string; readonly line: number; readonly startLine: number; readonly code: string }
@@ -13,10 +14,17 @@ export type ExportPage = {
 
 function loc(source: SourceLoc | null): string {
   if (!source) return 'unresolved'
-  const at = `${source.line}:${source.column}`
-  const lib = source.file.lastIndexOf('/node_modules/')
-  if (lib === -1) return `${source.file}:${at}`
-  return `library code (${source.file.slice(lib + '/node_modules/'.length).replace(/^\.pnpm\/[^/]+\/node_modules\//, '')}:${at})`
+  return `${source.file}:${source.line}:${source.column}`
+}
+
+function placed(source: SourceLoc | null): string {
+  const origin = classifySourcePath(source)
+  return origin.origin === 'package' ? `in ${origin.packageName}` : `at ${loc(source)}`
+}
+
+function elementSource(source: SourceLoc | null): string {
+  const origin = classifySourcePath(source)
+  return origin.origin === 'package' ? `library code in ${origin.packageName}` : loc(source)
 }
 
 function code(text: string): string {
@@ -47,17 +55,17 @@ function pinSection({ pin, cropFile, excerpts = [] }: ExportPin, n: number): str
   if (pin.note.includes('\n')) lines.push('', pin.note, '')
   lines.push(`- Screenshot: ${cropFile ?? 'not saved'}`)
   if (ins.react) {
-    lines.push(`- Source: ${loc(pin.elementSite)} (${code(`<${ins.tag}>`)} element)`)
+    lines.push(`- Source: ${elementSource(pin.elementSite)} (${code(`<${ins.tag}>`)} element)`)
     for (const { file, line, startLine, code: text } of excerpts) {
       lines.push(`- Code around ${file}:${line} (lines ${startLine} to ${startLine + text.split('\n').length - 1}):`, '', '````', text, '````')
     }
     if (owners.length) {
       lines.push(`- Components: ${owners.map(o => o.name).reverse().join(' > ')}`)
       lines.push('- Call sites (innermost first):')
-      lines.push(`  - ${code(`<${ins.tag}>`)} at ${loc(pin.elementSite)}`)
+      lines.push(`  - ${code(`<${ins.tag}>`)} ${placed(pin.elementSite)}`)
       for (const [i, site] of pin.callSites.entries()) {
         const env = owners[i]?.env === 'server' ? ' (server component)' : ''
-        lines.push(`  - ${code(`<${site.name}>`)}${env} at ${loc(site.loc)}`)
+        lines.push(`  - ${code(`<${site.name}>`)}${env} ${placed(site.loc)}`)
       }
     }
   } else {

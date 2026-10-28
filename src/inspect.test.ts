@@ -69,8 +69,75 @@ describe('inspectElement', () => {
     expect(props.rows).toEqual([1, 2, 3, 4, 5, '...(+2 more)'])
     expect(props.onSave).toBe('[function onSave]')
     expect(props.notes).toMatch(/^x{200}\.\.\.\(\+50 chars\)$/)
-    expect(JSON.parse(owners[0].state ?? 'null')).toEqual(['draft', true])
+    expect(JSON.parse(owners[0].state ?? 'null')).toEqual(['[string]', true])
     expect(JSON.parse(owners[1].props ?? 'null')).toEqual({ params: {} })
+  })
+
+  it('collects up to 20 owners nearest first, each with props', () => {
+    document.body.innerHTML = '<button data-annotate-dom-target="m3">Go</button>'
+    const button = document.querySelector('button')
+    if (!button) throw new Error('fixture missing')
+    let owner: object | undefined
+    for (let n = 25; n >= 1; n--) {
+      owner = { tag: 0, type: { displayName: `Owner${n}` }, memoizedProps: { n }, memoizedState: null, _debugOwner: owner }
+    }
+    Reflect.set(button, '__reactFiber$abc', { tag: 5, type: 'button', _debugOwner: owner })
+
+    const owners = runInPage('m3')?.react?.owners ?? []
+    expect(owners.map(o => o.name)).toEqual(Array.from({ length: 20 }, (_, i) => `Owner${i + 1}`))
+    expect(owners.map(o => JSON.parse(o.props ?? 'null').n)).toEqual(Array.from({ length: 20 }, (_, i) => i + 1))
+  })
+
+  function behindFourLibraryOwners(marker: string, hookValues: readonly unknown[]) {
+    const button = document.querySelector('button')
+    if (!button) throw new Error('fixture missing')
+    const setter = { lastRenderedReducer: () => null }
+    const hooks = hookValues.reduceRight<object | null>((next, memoizedState) => ({ memoizedState, queue: setter, next }), null)
+    let owner: object = { tag: 0, type: { displayName: 'LoginDialog' }, memoizedProps: { title: 'Sign in' }, memoizedState: hooks }
+    for (let n = 4; n >= 1; n--) owner = { tag: 0, type: { displayName: `Lib${n}` }, memoizedProps: {}, memoizedState: null, _debugOwner: owner }
+    Reflect.set(button, '__reactFiber$abc', { tag: 5, type: 'button', _debugOwner: owner })
+    const loginDialog = runInPage(marker)?.react?.owners[4]
+    expect(loginDialog?.name).toBe('LoginDialog')
+    return JSON.parse(loginDialog?.state ?? 'null')
+  }
+
+  it('hides every string held directly in hook state, whatever it looks like', () => {
+    document.body.innerHTML = '<input type="password"><button data-annotate-dom-target="m4">Go</button>'
+    const input = document.querySelector('input')
+    if (!input) throw new Error('fixture missing')
+    input.value = 'hunter2-password'
+    const state = behindFourLibraryOwners('m4', [
+      'hunter2-password',
+      'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln',
+      'sk-live-abcdef0123456789',
+      '9f8e7d6c5b4a39281706f5e4d3c2b1a0',
+      'Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln',
+    ])
+    expect(state).toEqual(['[string]', '[string]', '[string]', '[string]', '[string]'])
+  })
+
+  it('hides a typed password in hook state after show-password turns the field to type=text', () => {
+    document.body.innerHTML = '<input type="text"><button data-annotate-dom-target="m5">Go</button>'
+    const input = document.querySelector('input')
+    if (!input) throw new Error('fixture missing')
+    input.value = 'hunter2-password'
+    expect(behindFourLibraryOwners('m5', ['hunter2-password'])).toEqual(['[string]'])
+  })
+
+  it('hides a password kept in hook state after its field was cleared', () => {
+    document.body.innerHTML = '<input type="password"><button data-annotate-dom-target="m6">Go</button>'
+    expect(behindFourLibraryOwners('m6', ['hunter2-password'])).toEqual(['[string]'])
+  })
+
+  it('keeps numbers, booleans and shapes in hook state, hiding strings inside arrays but not under keys', () => {
+    document.body.innerHTML = '<button data-annotate-dom-target="m7">Go</button>'
+    expect(behindFourLibraryOwners('m7', [3, false, null, ['a', 2], { step: 'review', count: 2 }])).toEqual([
+      3,
+      false,
+      null,
+      ['[string]', 2],
+      { step: 'review', count: 2 },
+    ])
   })
 
   it('returns null when the marker is gone and works without React', () => {

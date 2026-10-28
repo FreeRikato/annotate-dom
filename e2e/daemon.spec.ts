@@ -221,3 +221,85 @@ test('a page with no local project falls back to Copy all while the daemon runs'
     bareFixture.kill()
   }
 })
+
+async function blockClipboardInOverlay(): Promise<void> {
+  const session = await context.newCDPSession(page)
+  const contentWorlds: number[] = []
+  session.on('Runtime.executionContextCreated', ({ context: world }) => {
+    if (world.origin.startsWith('chrome-extension://')) contentWorlds.push(world.id)
+  })
+  await session.send('Runtime.enable')
+  const stubs = `
+    navigator.clipboard.writeText = () => Promise.reject(new DOMException('blocked', 'NotAllowedError'))
+    document.execCommand = () => false
+  `
+  for (const contextId of contentWorlds) await session.send('Runtime.evaluate', { contextId, expression: stubs })
+  await session.detach()
+}
+
+async function pinTheme(note: string): Promise<void> {
+  await page.goto(`${fixtureUrl}/settings`)
+  await toggleOverlay()
+  const overlay = page.locator('annotate-dom-root')
+  await expect(overlay.locator('.panel')).toBeVisible()
+  await blockClipboardInOverlay()
+  await page.locator('#theme').click()
+  await overlay.locator('.editor textarea').fill(note)
+  await overlay.locator('.editor textarea').press('Enter')
+  await expect(overlay.locator('.title')).toHaveText('annotate-dom (1)', { timeout: 20_000 })
+}
+
+test('Send says the clipboard is blocked and shows the prompt when both clipboard paths fail', async () => {
+  await pinTheme('clipboard is blocked')
+  const overlay = page.locator('annotate-dom-root')
+
+  await overlay.getByRole('button', { name: 'Send' }).click()
+
+  await expect(overlay.locator('.toast span')).toHaveText(
+    /^Sent 1 annotation to \.annotations\/\d{4}-\d{2}-\d{2}-\d{4}-settings(-\d+)?\/; clipboard blocked, prompt is in the panel\.$/,
+    { timeout: 20_000 },
+  )
+  const sentFolder = (await overlay.locator('.toast span').innerText()).match(/\.annotations\/([^/]+)\//)?.[1]
+  expect(await overlay.locator('.fallback textarea').inputValue()).toBe(`Fix the annotations in .annotations/${sentFolder}/`)
+})
+
+test('Copy all says the clipboard is blocked and shows the markdown when both clipboard paths fail', async () => {
+  await stopDaemon()
+  await pinTheme('clipboard is blocked while the daemon is down')
+  const overlay = page.locator('annotate-dom-root')
+  await expect(overlay.getByRole('button', { name: 'Copy all' })).toBeVisible({ timeout: 10_000 })
+
+  await overlay.getByRole('button', { name: 'Copy all' }).click()
+
+  await expect(overlay.locator('.toast span')).toHaveText('Clipboard blocked; markdown is in the panel.', { timeout: 20_000 })
+  expect(await overlay.locator('.fallback textarea').inputValue()).toContain('clipboard is blocked while the daemon is down')
+  await startDaemon()
+})
+
+test('Send stores the 6 selected owners of a pin, with props for the first 3 only', async () => {
+  await page.goto(`${fixtureUrl}/settings`)
+  await page.evaluate(() => {
+    let owner: object | undefined
+    for (let n = 8; n >= 1; n--) owner = { tag: 0, type: { displayName: `Owner${n}` }, memoizedProps: { n }, memoizedState: null, _debugOwner: owner }
+    Reflect.set(document.querySelector('#theme') ?? {}, '__reactFiber$e2e', { tag: 5, type: 'button', _debugOwner: owner })
+  })
+  await toggleOverlay()
+  const overlay = page.locator('annotate-dom-root')
+  await expect(overlay.locator('.panel')).toBeVisible()
+  await page.locator('#theme').click()
+  await overlay.locator('.editor textarea').fill('eight owners')
+  await overlay.locator('.editor textarea').press('Enter')
+  await expect(overlay.locator('.list')).toContainText('eight owners', { timeout: 20_000 })
+
+  await overlay.getByRole('button', { name: 'Send' }).click()
+  await expect(overlay.locator('.toast')).toContainText('Sent', { timeout: 20_000 })
+
+  const pins = readdirSync(join(project, '.annotations')).flatMap(folder =>
+    JSON.parse(readFileSync(join(project, '.annotations', folder, 'batch.json'), 'utf8')).pins,
+  )
+  const pin = pins.find((p: { note: string }) => p.note === 'eight owners')
+  const owners: { name: string; props: string | null }[] = pin.inspection.react.owners
+  expect(owners.map(o => o.name)).toEqual(['Owner1', 'Owner2', 'Owner3', 'Owner4', 'Owner5', 'Owner6'])
+  expect(owners.map(o => o.props)).toEqual(['{"n":1}', '{"n":2}', '{"n":3}', null, null, null])
+  expect(pin.callSites).toHaveLength(6)
+})

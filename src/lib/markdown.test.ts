@@ -66,7 +66,8 @@ describe('toMarkdown', () => {
     expect(md).toContain('- Components: InventoryPage > ItemForm > Button')
     expect(md).toContain('  - `<Button>` at /app/components/item-form.tsx:88:7')
     expect(md).toContain('  - `<InventoryPage>` (server component) at unresolved')
-    expect(md).toContain('  - `<InventoryPage>` (server component) at library code (next/dist/rsc.js:3524:35)')
+    expect(md).toContain('  - `<InventoryPage>` (server component) in next')
+    expect(md).not.toContain('library code (')
   })
 
   it('includes screenshots, viewport, props, state, parents and HTML', () => {
@@ -242,5 +243,51 @@ describe('toMarkdown', () => {
 
   it('has no em dashes', () => {
     expect(md).not.toContain('—')
+  })
+})
+
+describe('toMarkdown call sites', () => {
+  const owners = [
+    { name: 'MenuContent', env: 'client', stack: 'x', props: null, state: null },
+    { name: 'UserMenu', env: 'client', stack: 'x', props: null, state: null },
+    { name: 'X', env: 'client', stack: 'x', props: null, state: null },
+  ] as const
+
+  function render(elementFile: string) {
+    const base = pin('c', '/menu', 'menu')
+    return toMarkdown({
+      origin: 'http://localhost:3000',
+      createdAt: 0,
+      pages: [{
+        path: '/menu',
+        url: 'http://localhost:3000/menu',
+        viewportFile: null,
+        pins: [{
+          cropFile: null,
+          pin: {
+            ...base,
+            inspection: { ...inspection, react: { elementStack: 'x', owners } },
+            elementSite: { file: elementFile, line: 4, column: 2 },
+            callSites: [
+              { name: 'MenuContent', loc: { file: '/app/node_modules/@radix-ui/react-menu/dist/index.mjs', line: 9, column: 1 } },
+              { name: 'UserMenu', loc: { file: '/app/src/user-menu.tsx', line: 22, column: 5 } },
+              { name: 'X', loc: null },
+            ],
+          },
+        }],
+      }],
+    })
+  }
+
+  it('prints a library call site by package and app sites by position', () => {
+    const md = render('/app/src/button.tsx')
+    expect(md).toContain('  - `<MenuContent>` in @radix-ui/react-menu\n')
+    expect(md).toContain('  - `<UserMenu>` at /app/src/user-menu.tsx:22:5')
+    expect(md).toContain('  - `<X>` at unresolved')
+  })
+
+  it('prints a library element site on the Source line by package', () => {
+    const md = render('/app/node_modules/.pnpm/next@16.3.4_x/node_modules/next/dist/rsc.js')
+    expect(md).toContain('- Source: library code in next (`<button>` element)')
   })
 })
