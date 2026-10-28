@@ -247,6 +247,25 @@ describe('toMarkdown', () => {
     }
   })
 
+  it('lists the css variables after the tokens in standard and forensic, and nowhere in compact', () => {
+    const render = (level: 'compact' | 'standard' | 'forensic', cssVariables?: Inspection['cssVariables']) => toMarkdown({
+      origin: 'http://localhost:3000',
+      createdAt: 0,
+      level,
+      pages: [{
+        path: '/settings', url: 'http://localhost:3000/settings', viewportFile: null,
+        pins: [{ pin: { ...pin('a', '/settings', 'x'), inspection: { ...inspection, cssVariables } }, cropFile: null }],
+      }],
+    })
+    const variables = [{ name: '--primary', value: 'oklch(0.2 0.1 250)' }, { name: '--radius', value: '0.5rem' }]
+    for (const level of ['standard', 'forensic'] as const) {
+      expect(render(level, variables)).toContain('- CSS variables: --primary: oklch(0.2 0.1 250); --radius: 0.5rem\n')
+      expect(render(level, [])).not.toContain('CSS variables')
+      expect(render(level)).not.toContain('CSS variables')
+    }
+    expect(render('compact', variables)).not.toContain('CSS variables')
+  })
+
   it('has no em dashes', () => {
     expect(md).not.toContain('—')
   })

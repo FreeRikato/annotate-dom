@@ -1,5 +1,5 @@
 import type {
-  Accessibility, Ancestor, AxeViolation, BoxModel, ConsoleEvent, DesignTokens, Inspection, Interaction, NetworkEvent, OwnerSnapshot, QuerySnapshot, RecordedConsole,
+  Accessibility, Ancestor, AxeViolation, BoxModel, ConsoleEvent, CssVariable, DesignTokens, Inspection, Interaction, NetworkEvent, OwnerSnapshot, QuerySnapshot, RecordedConsole,
   RecordedRequest, Sides, TokenValue,
 } from './lib/types'
 
@@ -20,6 +20,7 @@ export function inspectElement(marker: string): Inspection | null {
   const HOVERED_ATTR = 'data-annotate-dom-hovered'
   const SECRET_SUBSTRING = /token|secret|password|key|session|auth|cookie|pwd|passcode|credential/i
   const SECRET_WORDS = new Set(['pin', 'otp'])
+  const VAR_REFERENCE = /var\(\s*(--[^\s,)]+)/g
   const JWT = /^eyJ[\w-]*\.[\w-]*\.[\w-]*$/
   const HTML_LIMIT = 10000
   const PROPS_LIMIT = 2000
@@ -29,6 +30,9 @@ export function inspectElement(marker: string): Inspection | null {
   const MAX_SHAPE_KEYS = 10
   const ERROR_LIMIT = 300
   const MAX_DIALOGS = 5
+  const MAX_CSS_VARIABLES = 30
+  const TAILWIND_INTERNAL_PREFIX = '--tw-'
+  const MIN_CONTAINED_SECRET = 8
   const SELECTION_LIMIT = 500
   const TOKEN_KEYS = ['color', 'background-color', 'padding', 'margin', 'gap', 'border-radius']
   const EMPTY_VALUES = new Set(['', '0px', 'none', 'normal', 'auto', 'transparent', 'rgba(0, 0, 0, 0)'])
@@ -333,19 +337,12 @@ export function inspectElement(marker: string): Inspection | null {
     return isRecord(value) && typeof Reflect.get(value, Symbol.iterator) === 'function'
   }
 
-  function customProperties(): string[] {
-    const names = new Set<string>()
-    const visit = (rules: Iterable<unknown>) => {
-      for (const rule of rules) {
-        if (!isRecord(rule)) continue
-        const style = rule.style
-        if (isRecord(style) && typeof style.length === 'number') {
-          for (let i = 0; i < style.length; i++) {
-            const name: unknown = Reflect.get(style, i)
-            if (typeof name === 'string' && name.startsWith('--')) names.add(name)
-          }
-        }
-        if (isIterable(rule.cssRules)) visit(rule.cssRules)
+  function styleRules(): CSSStyleRule[] {
+    const rules: CSSStyleRule[] = []
+    const visit = (list: Iterable<unknown>) => {
+      for (const rule of list) {
+        if (rule instanceof CSSStyleRule) rules.push(rule)
+        if (isRecord(rule) && isIterable(rule.cssRules)) visit(rule.cssRules)
       }
     }
     for (const sheet of Array.from(document.styleSheets)) {
@@ -355,7 +352,71 @@ export function inspectElement(marker: string): Inspection | null {
         continue
       }
     }
-    return Array.from(names)
+    return rules
+  }
+
+  function declaredNames(style: CSSStyleDeclaration): string[] {
+    return Array.from(style).filter(name => name.startsWith('--'))
+  }
+
+  function customProperties(): string[] {
+    return Array.from(new Set(styleRules().flatMap(rule => declaredNames(rule.style))))
+  }
+
+  function matchesNode(node: Element, selector: string): boolean {
+    try {
+      return node.matches(selector)
+    } catch {
+      return false
+    }
+  }
+
+  function referencedNames(cssText: string): string[] {
+    return Array.from(cssText.matchAll(VAR_REFERENCE), match => match[1] ?? '')
+  }
+
+  function secretVariableValues(node: Element): string[] {
+    const values = new Set<string>()
+    for (let n: Element | null = node; n; n = n.parentElement) {
+      const style = getComputedStyle(n)
+      for (const name of declaredNames(style)) {
+        const value = style.getPropertyValue(name).trim()
+        if (value !== '' && isSecretKey(name)) values.add(value)
+      }
+    }
+    return Array.from(values)
+  }
+
+  function holdsSecret(value: string, secrets: readonly string[]): boolean {
+    return secrets.some(secret => secret.length >= MIN_CONTAINED_SECRET && value.includes(secret))
+  }
+
+  function cssVariables(node: Element): CssVariable[] {
+    const rules = styleRules()
+    const scoped: Element[] = []
+    for (let n: Element | null = node; n && n !== n.ownerDocument.documentElement; n = n.parentElement) scoped.push(n)
+
+    const referenced = new Set([
+      ...referencedNames(node instanceof HTMLElement ? node.style.cssText : ''),
+      ...rules.filter(rule => matchesNode(node, rule.selectorText)).flatMap(rule => referencedNames(rule.style.cssText)),
+    ])
+    for (const name of referenced) {
+      for (const rule of rules) for (const next of referencedNames(rule.style.getPropertyValue(name))) referenced.add(next)
+    }
+
+    const declared = new Set([
+      ...scoped.flatMap(n => (n instanceof HTMLElement ? declaredNames(n.style) : [])),
+      ...rules.filter(rule => scoped.some(n => matchesNode(n, rule.selectorText))).flatMap(rule => declaredNames(rule.style)),
+    ])
+
+    const computed = getComputedStyle(node)
+    const secrets = secretVariableValues(node)
+    const ordered = [...Array.from(referenced).sort(), ...Array.from(declared).filter(name => !referenced.has(name)).sort()]
+    return ordered
+      .map(name => ({ name, value: computed.getPropertyValue(name).trim() }))
+      .filter(v => v.value !== '' && !v.name.startsWith(TAILWIND_INTERNAL_PREFIX))
+      .map(v => (isSecretKey(v.name) || holdsSecret(v.value, secrets) ? { name: v.name, value: '[redacted]' } : v))
+      .slice(0, MAX_CSS_VARIABLES)
   }
 
   function designTokens(node: Element): DesignTokens {
@@ -490,6 +551,7 @@ export function inspectElement(marker: string): Inspection | null {
     queries: querySnapshots(fiber),
     interaction: interactionState(),
     tokens: designTokens(el),
+    cssVariables: cssVariables(el),
     locator: locatorFor(el),
     a11y: accessibility(el),
     ...(selectedText !== undefined && { selectedText }),
