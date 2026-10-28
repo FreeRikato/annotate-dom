@@ -1,4 +1,4 @@
-import type { Box, Inspection, Pin } from './types'
+import type { Box, DetailLevel, Inspection, Pin } from './types'
 
 export const DAEMON_URL = 'ws://localhost:4747/ws'
 export const PING_MS = 20_000
@@ -6,7 +6,7 @@ export const FIRST_RETRY_MS = 250
 export const MAX_RETRY_MS = 5_000
 export const SEND_TIMEOUT_MS = 30_000
 export const TARGET_ATTR = 'data-annotate-dom-target'
-
+export const SETTINGS_KEY = 'settings'
 export type BatchFrame = {
   readonly type: 'batch'
   readonly reqId: string
@@ -14,6 +14,7 @@ export type BatchFrame = {
   readonly createdAt: number
   readonly pages: readonly { readonly path: string; readonly url: string; readonly viewport: string | null }[]
   readonly pins: readonly (Pin & { readonly n: number })[]
+  readonly level?: DetailLevel
 }
 
 export type SavedBatch = { readonly project: string; readonly folder: string; readonly prompt: string }

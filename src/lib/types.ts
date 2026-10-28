@@ -76,6 +76,12 @@ export type Accessibility = {
 
 export type DetailLevel = 'compact' | 'standard' | 'forensic'
 
+export const DETAIL_LEVELS: readonly DetailLevel[] = ['compact', 'standard', 'forensic']
+
+export function isDetailLevel(value: unknown): value is DetailLevel {
+  return DETAIL_LEVELS.some(level => level === value)
+}
+
 export type Inspection = {
   readonly selector: string
   readonly tag: string

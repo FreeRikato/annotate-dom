@@ -1,11 +1,11 @@
 import { copyText } from './lib/clipboard'
-import { sendLabel } from './lib/daemon'
+import { sendLabel, SETTINGS_KEY } from './lib/daemon'
 import { FOCUSED_ATTR, HOVERED_ATTR, MARKER_ATTR, type Reply, type Request, type Responses } from './lib/messages'
 import { withSelectedCallSites } from './lib/callsites'
 import { pageKey } from './lib/page'
 import { createResolver } from './lib/resolve'
 import { callSiteFrame, nextBasePath } from './lib/stack'
-import { emptyBatch, PROJECT_ROOT_NOT_FOUND, type Batch, type Box, type Pin } from './lib/types'
+import { DETAIL_LEVELS, emptyBatch, isDetailLevel, PROJECT_ROOT_NOT_FOUND, type Batch, type Box, type Pin } from './lib/types'
 
 const GLOBAL_KEY = '__annotateDomToggle'
 const DAEMON_POLL_MS = 2000
@@ -26,6 +26,7 @@ const CSS_TEXT = `
 .head { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid #3f3f46; }
 .title { font-weight: 600; flex: 1; }
 button { font: inherit; color: inherit; background: #27272a; border: 1px solid #3f3f46; border-radius: 6px; padding: 3px 8px; cursor: pointer; }
+select { font: inherit; color: inherit; background: #27272a; border: 1px solid #3f3f46; border-radius: 6px; padding: 3px 4px; }
 button:hover { background: #3f3f46; }
 button.on { background: #ff3b30; border-color: #ff3b30; color: #fff; }
 button.primary { background: #f4f4f5; color: #18181b; border-color: #f4f4f5; }
@@ -89,9 +90,14 @@ function start(): () => void {
   const head = h('div', { className: 'head' })
   const title = h('span', { className: 'title', text: 'annotate-dom' })
   const pickBtn = h('button', { text: 'Pick' })
+  const levelSelect = h('select')
+  levelSelect.title = 'Detail level'
+  levelSelect.ariaLabel = 'Detail level'
+  for (const level of DETAIL_LEVELS) levelSelect.append(new Option(level, level))
+  levelSelect.value = 'standard'
   const copyBtn = h('button', { className: 'primary', text: 'Copy all' })
   const closeBtn = h('button', { text: 'Close' })
-  head.append(title, pickBtn, copyBtn, closeBtn)
+  head.append(title, pickBtn, levelSelect, copyBtn, closeBtn)
   const list = h('div', { className: 'list' })
   const fallback = h('div', { className: 'fallback' })
   const fallbackText = h('textarea')
@@ -405,6 +411,7 @@ function start(): () => void {
     }
   }
 
+  levelSelect.addEventListener('change', () => void chrome.storage.local.set({ [SETTINGS_KEY]: { level: levelSelect.value } }))
   copyBtn.addEventListener('click', () => (connected ? sendToDaemon() : copyAll()))
   undoBtn.addEventListener('click', async () => {
     batch = await call({ kind: 'undo' })
@@ -453,6 +460,14 @@ function start(): () => void {
   refreshDaemonStatus()
   window.setInterval(refreshDaemonStatus, DAEMON_POLL_MS)
 
+  function showSavedLevel(settings: unknown) {
+    const level = typeof settings === 'object' && settings !== null && 'level' in settings ? settings.level : undefined
+    if (isDetailLevel(level)) levelSelect.value = level
+  }
+  chrome.storage.local.get(SETTINGS_KEY).then((stored: Record<string, unknown>) => showSavedLevel(stored[SETTINGS_KEY]), () => undefined)
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && SETTINGS_KEY in changes) showSavedLevel(changes[SETTINGS_KEY]?.newValue)
+  })
   call({ kind: 'get-batch' }).then(b => {
     batch = b
     renderList()

@@ -83,6 +83,31 @@ test('batch.json holds open pins, relative file names and absolute source paths'
   }
 })
 
+test.each(['compact', 'standard', 'forensic'] as const)('batch.md is written at the level carried in the batch: %s', async level => {
+  const { folder } = await writeBatch({ root, home, batch: wireBatch({ level }) })
+  const dirPath = join(root, '.annotations', folder)
+  const stored: StoredBatch = JSON.parse(await readFile(join(dirPath, 'batch.json'), 'utf8'))
+  const expected = toMarkdown({
+    origin: stored.origin,
+    createdAt: stored.createdAt,
+    level,
+    pages: stored.pages.map(page => ({
+      ...page,
+      pins: stored.pins.filter(p => p.path === page.path).map(p => ({ pin: { ...p, crop: '' }, cropFile: p.cropFile, excerpts: p.excerpts })),
+    })),
+  })
+  expect(await readFile(join(dirPath, 'batch.md'), 'utf8')).toBe(expected)
+})
+
+test('a batch with no level writes the standard batch.md and compact is shorter', async () => {
+  const plain = await writeBatch({ root, home, batch: wireBatch() })
+  const compact = await writeBatch({ root, home, batch: wireBatch({ level: 'compact' }) })
+  const read = (folder: string) => readFile(join(root, '.annotations', folder, 'batch.md'), 'utf8')
+  const standard = await writeBatch({ root, home, batch: wireBatch({ level: 'standard' }) })
+  expect(await read(plain.folder)).toBe(await read(standard.folder))
+  expect((await read(compact.folder)).length).toBeLessThan((await read(plain.folder)).length)
+})
+
 test('batch.md is toMarkdown of the stored batch with relative file names', async () => {
   const { folder } = await writeBatch({ root, home, batch: wireBatch() })
   const dirPath = join(root, '.annotations', folder)

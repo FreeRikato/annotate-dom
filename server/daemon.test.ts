@@ -81,6 +81,19 @@ test('a 3-pin batch is written into the project and the reply names folder and p
   expect(files.sort()).toEqual(['batch.json', 'batch.md', 'pin-1.png', 'pin-2.png', 'pin-3.png', 'viewport-1-settings.png'])
 })
 
+test('the level in a batch frame shapes batch.md, and an unknown level falls back to standard', async () => {
+  const ws = await connect(allowed)
+  const file = join(project, 'components/a.tsx')
+  await request(ws, { type: 'batch', reqId: 'r1', ...batchOf(file), level: 'compact' })
+  await request(ws, { type: 'batch', reqId: 'r2', ...batchOf(file), level: 'loud' })
+  ws.close()
+  const read = (folder: string) => readFile(join(project, '.annotations', folder, 'batch.md'), 'utf8')
+  const compact = await read('2026-10-27-1405-settings')
+  const fallback = await read('2026-10-27-1405-settings-2')
+  expect(compact).toContain('1. **button**')
+  expect(fallback).toContain('### 1.')
+})
+
 test('ping is answered with pong', async () => {
   const ws = await connect(allowed)
   expect(await request(ws, { type: 'ping' })).toEqual({ type: 'pong' })

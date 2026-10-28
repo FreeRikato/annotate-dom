@@ -1,7 +1,7 @@
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 import { type Excerpt, type ExportPage, toMarkdown } from '../src/lib/markdown'
-import type { CallSite, Pin, SourceLoc } from '../src/lib/types'
+import type { CallSite, DetailLevel, Pin, SourceLoc } from '../src/lib/types'
 import { readExcerpts } from './excerpt'
 import { knownProjects } from './store'
 
@@ -12,6 +12,7 @@ export type WireBatch = {
   readonly createdAt: number
   readonly pages: readonly WirePage[]
   readonly pins: readonly (Pin & { readonly n: number })[]
+  readonly level?: DetailLevel
 }
 
 export type StoredRecapture = {
@@ -99,14 +100,14 @@ async function storedPin(root: string, { crop: _crop, ...pin }: Pin & { readonly
   }
 }
 
-export function renderStoredMarkdown(batch: StoredBatch): string {
+export function renderStoredMarkdown(batch: StoredBatch, level?: DetailLevel): string {
   const pages: ExportPage[] = batch.pages.map(page => ({
     ...page,
     pins: batch.pins
       .filter(pin => pin.path === page.path)
       .map(pin => ({ pin: { ...pin, crop: '' }, cropFile: pin.cropFile, excerpts: pin.excerpts })),
   }))
-  return toMarkdown({ origin: batch.origin, createdAt: batch.createdAt, pages })
+  return toMarkdown({ origin: batch.origin, createdAt: batch.createdAt, pages, level })
 }
 
 async function run(root: string, args: readonly string[]): Promise<string | null> {
@@ -153,7 +154,7 @@ export async function writeBatch({ root, home, batch }: {
   }
   await Promise.all([
     writeFile(join(dir, 'batch.json'), JSON.stringify(stored, null, 2)),
-    writeFile(join(dir, 'batch.md'), renderStoredMarkdown(stored)),
+    writeFile(join(dir, 'batch.md'), renderStoredMarkdown(stored, batch.level)),
     ...batch.pins.map(pin => writeFile(join(dir, `pin-${pin.n}.png`), decodeDataUrl(pin.crop))),
     ...batch.pages.flatMap((page, i) => {
       const file = pages[i]?.viewportFile
