@@ -11,6 +11,7 @@ export type Request =
   | { readonly kind: 'add-pin'; readonly pin: Pin; readonly viewport: string; readonly dpr: number; readonly rects: Readonly<Record<string, Box>> }
   | { readonly kind: 'delete-pin'; readonly id: string }
   | { readonly kind: 'export'; readonly origin: string }
+  | { readonly kind: 'quick-grab'; readonly pin: Pin; readonly origin: string }
   | { readonly kind: 'undo' }
   | { readonly kind: 'daemon-status' }
   | { readonly kind: 'send'; readonly origin: string }
@@ -22,6 +23,7 @@ export type Responses = {
   readonly 'add-pin': Batch
   readonly 'delete-pin': Batch
   readonly export: { readonly markdown: string; readonly count: number }
+  readonly 'quick-grab': { readonly markdown: string }
   readonly undo: Batch
   readonly 'daemon-status': { readonly connected: boolean }
   readonly send: { readonly count: number; readonly folder: string; readonly prompt: string }
@@ -31,7 +33,7 @@ export type Reply<K extends Request['kind']> =
   | { readonly ok: true; readonly data: Responses[K] }
   | { readonly ok: false; readonly error: string }
 
-const KINDS: ReadonlySet<string> = new Set<Request['kind']>(['inspect', 'capture', 'get-batch', 'add-pin', 'delete-pin', 'export', 'undo', 'daemon-status', 'send'])
+const KINDS: ReadonlySet<string> = new Set<Request['kind']>(['inspect', 'capture', 'get-batch', 'add-pin', 'delete-pin', 'export', 'quick-grab', 'undo', 'daemon-status', 'send'])
 
 export function hasRequestKind(value: unknown): value is Request {
   return typeof value === 'object' && value !== null && 'kind' in value && typeof value.kind === 'string' && KINDS.has(value.kind)
