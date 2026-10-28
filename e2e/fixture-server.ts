@@ -74,6 +74,18 @@ clip.play()
 </script></body>
 </html>`
 
+const multiPage = () => `<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Fixture multi</title>
+<style>body{margin:0;height:900px}button{position:absolute;width:120px;height:40px;font-size:16px}</style></head>
+<body>
+<button id="a" type="button" style="left:100px;top:200px">Alpha</button>
+<button id="b" type="button" style="left:260px;top:200px">Beta</button>
+<button id="c" type="button" style="left:420px;top:200px">Gamma</button>
+<button id="far" type="button" style="left:700px;top:500px">Far</button>
+</body>
+</html>`
+
 const shadowPage = () => `<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><title>Fixture shadow</title>
@@ -151,6 +163,7 @@ Bun.serve({
     if (url.pathname === '/router') return new Response(routerPage(), { headers: { 'content-type': 'text/html' } })
     if (url.pathname === '/backdrop') return new Response(backdropPage(), { headers: { 'content-type': 'text/html' } })
     if (url.pathname === '/nested') return new Response(nestedPage(), { headers: { 'content-type': 'text/html' } })
+    if (url.pathname === '/multi') return new Response(multiPage(), { headers: { 'content-type': 'text/html' } })
     if (url.pathname === '/shadow') return new Response(shadowPage(), { headers: { 'content-type': 'text/html' } })
     if (url.pathname === '/inner-frame') return new Response(innerFramePage(), { headers: { 'content-type': 'text/html' } })
     if (url.pathname === '/frames') return new Response(framesPage(foreignPort), { headers: { 'content-type': 'text/html' } })

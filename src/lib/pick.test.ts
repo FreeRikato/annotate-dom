@@ -2,7 +2,7 @@
 import { Window } from 'happy-dom'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { deepCandidates, isSealedFrame, topRect } from './deep'
-import { pickTarget } from './pick'
+import { dragRect, isDrag, MAX_DRAG_SELECTION, pickTarget, selectInRect } from './pick'
 
 const viewport = { width: 1000, height: 800 }
 
@@ -196,5 +196,47 @@ describe('deepCandidates', () => {
     deepCandidates(document, 130, 90, document.createElement('x'))
     expect(seen).toEqual([[24, 31]])
     expect(topRect(target)).toMatchObject({ x: 116, y: 79 })
+  })
+})
+
+describe('drag selection', () => {
+  const item = (name: string, x: number, y: number, w: number, h: number) => ({ name, box: { x, y, w, h } })
+  const rect = { x: 0, y: 0, w: 100, h: 100 }
+  const names = (items: readonly { name: string }[]) => items.map(i => i.name)
+  const all = () => true
+
+  it('treats a move under 8 px as a click and 8 px as a drag', () => {
+    expect(isDrag({ x: 10, y: 10 }, { x: 15, y: 14 })).toBe(false)
+    expect(isDrag({ x: 10, y: 10 }, { x: 18, y: 10 })).toBe(true)
+  })
+
+  it('builds the rectangle whichever way the pointer travels', () => {
+    expect(dragRect({ x: 50, y: 40 }, { x: 10, y: 90 })).toEqual({ x: 10, y: 40, w: 40, h: 50 })
+  })
+
+  it('keeps elements at least half inside and drops the rest', () => {
+    const half = item('half', 80, 0, 40, 10)
+    const under = item('under', 81, 0, 40, 10)
+    const out = item('out', 200, 200, 10, 10)
+    expect(names(selectInRect({ items: [half, under, out], rect, accept: all }))).toEqual(['half'])
+  })
+
+  it('lists the smallest area first', () => {
+    const big = item('big', 0, 0, 90, 90)
+    const small = item('small', 10, 10, 20, 20)
+    const mid = item('mid', 40, 40, 30, 30)
+    expect(names(selectInRect({ items: [big, small, mid], rect, accept: all }))).toEqual(['small', 'mid', 'big'])
+  })
+
+  it('stops at ten elements', () => {
+    const many = Array.from({ length: 14 }, (_, i) => item(`e${i}`, i, 0, 5, 5 + i))
+    expect(selectInRect({ items: many, rect, accept: all })).toHaveLength(MAX_DRAG_SELECTION)
+  })
+
+  it('skips elements that are not pickable and still fills the ten', () => {
+    const many = Array.from({ length: 12 }, (_, i) => item(`e${i}`, 0, 0, 5, 5 + i))
+    const picked = selectInRect({ items: many, rect, accept: ({ name }) => name !== 'e0' })
+    expect(picked).toHaveLength(MAX_DRAG_SELECTION)
+    expect(names(picked)).not.toContain('e0')
   })
 })

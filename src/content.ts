@@ -5,10 +5,10 @@ import { parseSavedLevel, sendLabel, SETTINGS_KEY } from './lib/daemon'
 import { FOCUSED_ATTR, HOVERED_ATTR, MARKER_ATTR, type Reply, type Request, type Responses } from './lib/messages'
 import { withSelectedCallSites } from './lib/callsites'
 import { pageKey } from './lib/page'
-import { pickTarget } from './lib/pick'
+import { dragRect, isDrag, pickTarget, selectInRect, type Point } from './lib/pick'
 import { createResolver } from './lib/resolve'
 import { callSiteFrame, nextBasePath } from './lib/stack'
-import { DETAIL_LEVELS, emptyBatch, PROJECT_ROOT_NOT_FOUND, type Batch, type Box, type Inspection, type Pin, type SourceLoc } from './lib/types'
+import { DETAIL_LEVELS, emptyBatch, unionBox, PROJECT_ROOT_NOT_FOUND, type Batch, type Box, type Inspection, type AlsoTarget, type Pin, type SourceLoc } from './lib/types'
 
 const GLOBAL_KEY = '__annotateDomToggle'
 const DAEMON_POLL_MS = 2000
@@ -25,6 +25,9 @@ const CSS_TEXT = `
 .root { position: fixed; inset: 0; pointer-events: none; font: 13px/1.4 system-ui, -apple-system, sans-serif; color: #f4f4f5; }
 .hl { position: fixed; border: 2px solid #ff3b30; background: rgba(255,59,48,.08); border-radius: 2px; display: none; }
 .hl-label { position: absolute; left: -2px; top: -22px; background: #ff3b30; color: #fff; padding: 1px 6px; font-size: 11px; border-radius: 3px; white-space: nowrap; }
+.drag { position: fixed; border: 1px dashed #ff3b30; background: rgba(255,59,48,.06); display: none; }
+.sel { position: fixed; border: 2px solid #ff3b30; background: rgba(255,59,48,.12); border-radius: 2px; }
+.sel-num { position: absolute; left: -2px; top: -22px; background: #ff3b30; color: #fff; padding: 1px 6px; font-size: 11px; border-radius: 3px; }
 .shield { position: fixed; pointer-events: auto; }
 .marker { position: fixed; width: 22px; height: 22px; margin: -11px 0 0 -11px; border-radius: 50%; background: #ff3b30; color: #fff; font-weight: 700; font-size: 12px; display: grid; place-items: center; box-shadow: 0 1px 4px rgba(0,0,0,.4); }
 .panel { position: fixed; right: 16px; bottom: 16px; width: 320px; max-height: 60vh; display: flex; flex-direction: column; background: #18181b; border: 1px solid #3f3f46; border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,.4); pointer-events: auto; overflow: hidden; }
@@ -84,7 +87,7 @@ function shortFile(file: string): string {
 type PinContext = { readonly focused: Element | null; readonly hovered: Element | null }
 type PinCapture = {
   readonly id: string
-  readonly sites: Promise<{ inspection: Inspection; elementSite: SourceLoc | null; callSites: Pin['callSites'] }>
+  readonly sites: Promise<{ inspection: Inspection; elementSite: SourceLoc | null; callSites: Pin['callSites']; also: AlsoTarget[] }>
   readonly shot: Responses['capture']
   readonly rects: Record<string, Box>
 }
@@ -133,7 +136,10 @@ function start(): () => void {
   const undoBtn = h('button', { text: 'Undo' })
   toast.append(toastText, undoBtn)
 
-  root.append(hl, markers, shieldLayer, panel, editor, toast)
+  const dragBox = h('div', { className: 'drag' })
+  const selection = h('div')
+
+  root.append(hl, dragBox, selection, markers, shieldLayer, panel, editor, toast)
   shadow.append(style, root)
   document.documentElement.append(host)
 
@@ -152,6 +158,10 @@ function start(): () => void {
   let chainIndex = 0
   let walking = false
   let editing: Element | null = null
+  let pending: Element[] = []
+  let dragFrom: Point | null = null
+  let dragging = false
+  let swallowClick = false
   let session: EditorSession | null = null
   const frozen = new Set<() => void>()
   const shields = new Map<Element, HTMLElement>()
@@ -217,6 +227,17 @@ function start(): () => void {
       m.style.top = `${Math.max(11, r.top)}px`
       markers.append(m)
     }
+  }
+
+  function renderSelection() {
+    selection.replaceChildren()
+    pending.forEach((el, i) => {
+      const r = topRect(el)
+      const mark = h('div', { className: 'sel' })
+      Object.assign(mark.style, { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` })
+      mark.append(h('div', { className: 'sel-num', text: String(i + 1) }))
+      selection.append(mark)
+    })
   }
 
   function showHighlight(el: Element | null, position = '') {
@@ -286,7 +307,7 @@ function start(): () => void {
     textarea.focus()
   }
 
-  async function capturePin(el: Element, context: PinContext, token: { cancelled: boolean }): Promise<PinCapture | null> {
+  async function capturePin([el, ...rest]: readonly [Element, ...Element[]], context: PinContext, token: { cancelled: boolean }): Promise<PinCapture | null> {
     const id = crypto.randomUUID()
     const inspection = await markAndInspect(el, id, context)
     if (token.cancelled) return null
@@ -297,7 +318,7 @@ function start(): () => void {
     try {
       await nextFrame()
       await nextFrame()
-      rect = boxOf(el)
+      rect = unionBox([boxOf(el), ...rest.map(boxOf)])
       rects[id] = rect
       for (const pin of batch.pins) {
         if (pin.path !== pageKey(location)) continue
@@ -310,13 +331,16 @@ function start(): () => void {
     }
     if (token.cancelled) return null
     placeEditor(el)
-    return { id, sites: resolveSites(inspection), shot, rects }
+    const sites = Promise.all([resolveSites(inspection), ...rest.map(alsoTarget)]).then(([main, ...also]) => ({ ...main, also }))
+    return { id, sites, shot, rects }
   }
 
-  function openEditor(el: Element) {
+  function openEditor(members: readonly [Element, ...Element[]]) {
+    const [el] = members
     cancelEditor()
+    pending = members.length > 1 ? [...members] : []
     const token = { cancelled: false }
-    const current: EditorSession = { token, release: freeze(), ready: capturePin(el, readPinContext(), token) }
+    const current: EditorSession = { token, release: freeze(), ready: capturePin(members, readPinContext(), token) }
     session = current
     editing = el
     showHighlight(el)
@@ -329,6 +353,7 @@ function start(): () => void {
 
   function closeEditor() {
     editing = null
+    pending = []
     editor.style.display = 'none'
     showHighlight(null)
   }
@@ -367,6 +392,11 @@ function start(): () => void {
     return { inspection: selected.inspection, elementSite: elementSite ?? null, callSites: selected.callSites }
   }
 
+  async function alsoTarget(el: Element): Promise<AlsoTarget> {
+    const { inspection, elementSite } = await inspectPinned(el, crypto.randomUUID(), { focused: null, hovered: null })
+    return { selector: inspection.selector, locator: inspection.locator ?? null, elementSite, box: boxOf(el) }
+  }
+
   async function inspectPinned(el: Element, id: string, context: PinContext) {
     return resolveSites(await markAndInspect(el, id, context))
   }
@@ -377,7 +407,7 @@ function start(): () => void {
     try {
       const captured = await current.ready
       if (!captured) return
-      const { inspection, elementSite, callSites } = await captured.sites
+      const { inspection, elementSite, callSites, also } = await captured.sites
       const pin: Pin = {
         id: captured.id,
         path: pageKey(location),
@@ -388,6 +418,7 @@ function start(): () => void {
         elementSite,
         callSites,
         crop: captured.shot.crop,
+        ...(also.length ? { also } : {}),
       }
       batch = await call({ kind: 'add-pin', pin, viewport: captured.shot.viewport, dpr: captured.shot.dpr, rects: captured.rects })
     } catch (err: unknown) {
@@ -439,7 +470,7 @@ function start(): () => void {
   }
 
   function onMove(event: MouseEvent) {
-    if (!visible || !picking || editing) return
+    if (!visible || !picking || editing || dragging) return
     pointTo(fromPage(event))
     showHighlight(target, pickPosition())
     const sealed = target && isSealedFrame(target) ? target : null
@@ -476,6 +507,12 @@ function start(): () => void {
     if (!visible || !picking) return
     const hit = fromPage(event)
     if (!hit) return
+    if (swallowClick) {
+      swallowClick = false
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      return
+    }
     const el = walking && target ? target : hit
     event.preventDefault()
     event.stopImmediatePropagation()
@@ -487,13 +524,78 @@ function start(): () => void {
       void quickGrab(el)
       return
     }
+    if ((event.metaKey || event.ctrlKey) && !editing) {
+      toggleMember(el)
+      return
+    }
+    if (pending.length && !editing) {
+      setToast('Press Enter to write one note for the selected elements, or Escape to clear them.', false)
+      return
+    }
     resetWalk()
-    openEditor(el)
+    openEditor([el])
+  }
+
+  function toggleMember(el: Element) {
+    resetWalk()
+    pending = pending.includes(el) ? pending.filter(member => member !== el) : [...pending, el]
+  }
+
+  function pickables(): { el: Element; box: Box }[] {
+    return [...document.querySelectorAll('*')]
+      .filter(el => el !== host && el !== document.body && el !== document.documentElement)
+      .map(el => ({ el, box: boxOf(el) }))
+  }
+
+  function onDown(event: MouseEvent) {
+    if (!visible || !picking || editing || event.button !== 0 || event.composedPath().includes(host)) return
+    swallowClick = false
+    dragFrom = pagePoint(event)
+  }
+
+  function onDragMove(event: MouseEvent) {
+    if (!dragFrom) return
+    if (!(event.buttons & 1)) {
+      dragFrom = null
+      return
+    }
+    const to = pagePoint(event)
+    if (!dragging && !isDrag(dragFrom, to)) return
+    dragging = true
+    const r = dragRect(dragFrom, to)
+    Object.assign(dragBox.style, { display: 'block', left: `${r.x}px`, top: `${r.y}px`, width: `${r.w}px`, height: `${r.h}px` })
+  }
+
+  function onUp(event: MouseEvent) {
+    const from = dragFrom
+    dragFrom = null
+    if (!from || !dragging) return
+    dragging = false
+    dragBox.style.display = 'none'
+    swallowClick = true
+    const view = { width: innerWidth, height: innerHeight }
+    const chosen = selectInRect({
+      items: pickables(),
+      rect: dragRect(from, pagePoint(event)),
+      accept: ({ el }) => pickTarget({ candidates: [el], viewport: view, overlayHost: host }) !== null,
+    })
+    pending = chosen.map(({ el }) => el)
+    showHighlight(null)
   }
 
   function onKey(event: KeyboardEvent) {
-    if (!visible || event.key !== 'Escape') return
+    if (!visible) return
+    const [first, ...rest] = pending
+    if (event.key === 'Enter' && picking && !editing && first) {
+      resetWalk()
+      openEditor([first, ...rest])
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      return
+    }
+    if (event.key !== 'Escape') return
     if (editing) cancelEditor()
+    else if (pending.length) pending = []
     else if (picking) {
       picking = false
       showHighlight(null)
@@ -574,6 +676,9 @@ function start(): () => void {
 
   function listenIn(win: Window) {
     const opts = { capture: true }
+    win.addEventListener('pointerdown', onDown, opts)
+    win.addEventListener('pointermove', onDragMove, opts)
+    win.addEventListener('pointerup', onUp, opts)
     win.addEventListener('mousemove', onMove, opts)
     for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'dblclick', 'auxclick']) {
       win.addEventListener(type, swallow, opts)
@@ -619,6 +724,7 @@ function start(): () => void {
         renderList()
       }
       renderMarkers()
+      renderSelection()
       syncFrames()
       if (editing) showHighlight(editing)
       else if (picking && target) showHighlight(target, pickPosition())
