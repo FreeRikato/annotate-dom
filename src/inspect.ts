@@ -18,7 +18,8 @@ export function inspectElement(marker: string): Inspection | null {
   const OVERLAY_TAG = 'annotate-dom-root'
   const FOCUSED_ATTR = 'data-annotate-dom-focused'
   const HOVERED_ATTR = 'data-annotate-dom-hovered'
-  const SECRET = /token|secret|password|key|session|auth|cookie/i
+  const SECRET_SUBSTRING = /token|secret|password|key|session|auth|cookie|pwd|passcode|credential/i
+  const SECRET_WORDS = new Set(['pin', 'otp'])
   const JWT = /^eyJ[\w-]*\.[\w-]*\.[\w-]*$/
   const HTML_LIMIT = 10000
   const PROPS_LIMIT = 2000
@@ -45,6 +46,12 @@ export function inspectElement(marker: string): Inspection | null {
 
   function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null
+  }
+
+  function isSecretKey(key: string): boolean {
+    if (SECRET_SUBSTRING.test(key)) return true
+    const words = key.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2').split(/[^A-Za-z0-9]+/)
+    return words.some(word => SECRET_WORDS.has(word.toLowerCase()))
   }
 
   function typeName(type: unknown): string {
@@ -98,7 +105,7 @@ export function inspectElement(marker: string): Inspection | null {
       return items
     }
     const out: Record<string, unknown> = {}
-    for (const [k, v] of Object.entries(value)) out[k] = SECRET.test(k) ? '[redacted]' : serialize(v, depth + 1)
+    for (const [k, v] of Object.entries(value)) out[k] = isSecretKey(k) ? '[redacted]' : serialize(v, depth + 1)
     return out
   }
 
@@ -226,7 +233,9 @@ export function inspectElement(marker: string): Inspection | null {
       out[attr.name] = attr.value.length > 300 ? `${attr.value.slice(0, 300)}...` : attr.value
     }
     if (node instanceof HTMLInputElement) {
-      out['(value)'] = node.type === 'password' ? '[redacted]' : node.value
+      const secret = node.type === 'password'
+      if (secret && node.hasAttribute('value')) out.value = '[redacted]'
+      out['(value)'] = secret ? '[redacted]' : node.value
       if (node.type === 'checkbox' || node.type === 'radio') out['(checked)'] = String(node.checked)
     }
     if (node instanceof HTMLTextAreaElement || node instanceof HTMLSelectElement) out['(value)'] = node.value
@@ -235,6 +244,16 @@ export function inspectElement(marker: string): Inspection | null {
       node instanceof HTMLSelectElement || node instanceof HTMLTextAreaElement
     ) out['(disabled)'] = String(node.disabled)
     return out
+  }
+
+  function outerHtmlWithoutPasswords(node: Element): string {
+    const isPassword = (field: Element): field is HTMLInputElement => field instanceof HTMLInputElement && field.type === 'password'
+    const fields = [node, ...Array.from(node.querySelectorAll('input'))].filter(isPassword)
+    if (fields.length === 0) return node.outerHTML
+    const copy = node.cloneNode(true)
+    if (!(copy instanceof Element)) return node.outerHTML
+    for (const field of [copy, ...Array.from(copy.querySelectorAll('input'))].filter(isPassword)) field.removeAttribute('value')
+    return copy.outerHTML
   }
 
   function recorded(): { console: ConsoleEvent[]; network: NetworkEvent[] } {
@@ -305,7 +324,7 @@ export function inspectElement(marker: string): Inspection | null {
       dialogs: Array.from(document.querySelectorAll('[role="dialog"], dialog[open], [open]')).slice(0, MAX_DIALOGS).map(selectorFor),
       searchParams: Array.from(new URLSearchParams(location.search), ([key, value]) => ({
         key,
-        value: SECRET.test(key) ? '[redacted]' : value,
+        value: isSecretKey(key) ? '[redacted]' : value,
       })),
     }
   }
@@ -450,7 +469,7 @@ export function inspectElement(marker: string): Inspection | null {
   }
 
   const rect = el.getBoundingClientRect()
-  const html = el.outerHTML.replace(new RegExp(` data-annotate-dom-(?:target|focused|hovered)="[^"]*"`, 'g'), '')
+  const html = outerHtmlWithoutPasswords(el).replace(new RegExp(` data-annotate-dom-(?:target|focused|hovered)="[^"]*"`, 'g'), '')
   const fiber = fiberOf(el)
   const selectedText = selectedTextIn(el)
 

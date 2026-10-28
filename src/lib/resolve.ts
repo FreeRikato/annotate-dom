@@ -24,6 +24,18 @@ function lastSourceMappingUrl(js: string): string | null {
   return matches.at(-1)?.[1] ?? null
 }
 
+class HttpStatusError extends Error {
+  readonly status: number
+
+  constructor(status: number, url: string) {
+    super(`${url} responded ${status}`)
+    this.name = 'HttpStatusError'
+    this.status = status
+  }
+}
+
+const STACK_FRAMES_ENDPOINT = '__nextjs_original-stack-frames'
+
 type MapLoad = { readonly traced: Promise<TraceMap | null>; readonly join: (deadline: AbortSignal) => void }
 
 export const MAX_CONCURRENT_FETCHES = 3
@@ -70,15 +82,24 @@ export function createResolver({
   readonly basePath?: string
 }) {
   const maps = new Map<string, MapLoad>()
+  let answeringBase: string | null = null
   const limited = createLimiter(MAX_CONCURRENT_FETCHES)
 
-  function fetchText(url: string): Promise<string> {
+  function fetchChecked<T>(
+    url: string,
+    init: RequestInit,
+    read: (res: Response) => Promise<T>,
+    deadline?: AbortSignal,
+  ): Promise<T> {
     return withTimeout(async signal => {
-      const res = await fetcher(url, { signal })
-      if (!res.ok) throw new Error(`${url} responded ${res.status}`)
-      return res.text()
+      deadline?.throwIfAborted()
+      const res = await fetcher(url, { ...init, signal })
+      if (!res.ok) throw new HttpStatusError(res.status, url)
+      return read(res)
     })
   }
+
+  const fetchText = (url: string) => fetchChecked(url, {}, res => res.text())
 
   function loadMap(chunkUrl: string, isAwaited: () => boolean): Promise<TraceMap | null> {
     return limited(async () => {
@@ -121,28 +142,40 @@ export function createResolver({
     return { file: normalizeSource({ source: pos.source, pageOrigin }), line: pos.line, column: pos.column + 1 }
   }
 
+  function stackFramesUrl(base: string): string {
+    const path = `/${base}/${STACK_FRAMES_ENDPOINT}`.replace(/[\\/]+/g, '/')
+    return new URL(path, pageOrigin).href
+  }
+
+  async function postStackFrames(request: RequestInit, deadline: AbortSignal): Promise<unknown> {
+    const post = (base: string) => limited(() => fetchChecked(stackFramesUrl(base), request, res => res.json(), deadline))
+    if (answeringBase !== null) return post(answeringBase)
+    try {
+      const body = await post(basePath)
+      answeringBase = basePath
+      return body
+    } catch (err: unknown) {
+      if (basePath === '' || !(err instanceof HttpStatusError) || err.status !== 404) throw err
+      const body = await post('')
+      answeringBase = ''
+      return body
+    }
+  }
+
   async function resolveServerFrames(frames: readonly Frame[], deadline: AbortSignal): Promise<(SourceLoc | null)[]> {
     const fileUrls = frames.map(serverFileUrl)
     try {
-      const body = await limited(() =>
-        withTimeout(async signal => {
-          deadline.throwIfAborted()
-          const res = await fetcher(`${pageOrigin}${basePath}/__nextjs_original-stack-frames`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            signal,
-            body: JSON.stringify({
-              frames: frames.map((frame, i) => ({ file: fileUrls[i], methodName: frame.fn, line1: frame.line, column1: frame.column })),
-              isServer: true,
-              isEdgeServer: false,
-              isAppDirectory: true,
-            }),
-          })
-          if (!res.ok) throw new Error(`dev server responded ${res.status}`)
-          const json: unknown = await res.json()
-          return json
+      const request = {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          frames: frames.map((frame, i) => ({ file: fileUrls[i], methodName: frame.fn, line1: frame.line, column1: frame.column })),
+          isServer: true,
+          isEdgeServer: false,
+          isAppDirectory: true,
         }),
-      )
+      }
+      const body = await postStackFrames(request, deadline)
       return fileUrls.map((fileUrl, i) => {
         const resolved = Array.isArray(body) ? nextFrameOf(body[i]) : null
         if (!resolved) return null

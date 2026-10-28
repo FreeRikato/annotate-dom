@@ -176,6 +176,103 @@ describe('inspectElement', () => {
     expect(JSON.parse(owners[1].props ?? 'null')).toEqual({ params: {} })
   })
 
+  describe('secret redaction', () => {
+    function reactProps(marker: string, props: object, state: unknown = null) {
+      document.body.innerHTML = `<button data-annotate-dom-target="${marker}">Go</button>`
+      const button = document.querySelector('button')
+      if (!button) throw new Error('fixture missing')
+      Reflect.set(button, '__reactFiber$abc', {
+        tag: 5,
+        type: 'button',
+        _debugOwner: { tag: 0, type: { displayName: 'Form' }, memoizedProps: props, memoizedState: state },
+      })
+      const owner = runInPage(marker)?.react?.owners[0]
+      return { props: JSON.parse(owner?.props ?? 'null'), state: owner?.state }
+    }
+
+    it.each(['pwd', 'passcode', 'pin', 'otp', 'credential', 'token', 'secret', 'password', 'key', 'session', 'auth', 'cookie'])(
+      'redacts the value under %s in any case',
+      name => {
+        const { props } = reactProps('r1', { [name]: 'hunter2', [name.toUpperCase()]: 'hunter2' })
+        expect(props[name]).toBe('[redacted]')
+        expect(props[name.toUpperCase()]).toBe('[redacted]')
+      },
+    )
+
+    it.each(['userPwd', 'otpCode', 'billingCredentials', 'resetPasscode', 'confirmPin', 'pin', 'userPin', 'user_pin', 'user-pin', 'otp_code', 'OTP', 'OTPCode', 'PIN'])(
+      'redacts the value under the longer key %s',
+      name => {
+        expect(reactProps('r2', { [name]: 'hunter2' }).props[name]).toBe('[redacted]')
+      },
+    )
+
+    it.each(['shipping', 'spinner', 'isPinned', 'footprint', 'opinion', 'topping', 'mapping', 'typing', 'hotpot'])(
+      'keeps the value under %s, which only contains pin or otp inside a word',
+      name => {
+        expect(reactProps('r2', { [name]: 'kept' }).props[name]).toBe('kept')
+      },
+    )
+
+    it('keeps a search param whose key only contains pin inside a word', () => {
+      document.body.innerHTML = '<p data-annotate-dom-target="r7">x</p>'
+      history.replaceState(null, '', '/?shipping=a&userPin=1')
+      expect(runInPage('r7')?.interaction?.searchParams).toEqual([
+        { key: 'shipping', value: 'a' },
+        { key: 'userPin', value: '[redacted]' },
+      ])
+    })
+
+    it('redacts inside hook state objects and leaves other keys alone', () => {
+      const { state } = reactProps('r3', {}, {
+        memoizedState: { pwd: 'hunter2', name: 'ada' },
+        queue: { lastRenderedReducer: () => null },
+        next: null,
+      })
+      expect(state).toContain('[redacted]')
+      expect(state).not.toContain('hunter2')
+      expect(state).toContain('"name":"ada"')
+    })
+
+    it('redacts a JWT-shaped string value under an innocent key', () => {
+      const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln'
+      const { props } = reactProps('r4', { note: jwt, label: 'plain' })
+      expect(props.note).toBe('[redacted]')
+      expect(props.label).toBe('plain')
+    })
+
+    it('redacts the value attribute of a password input', () => {
+      document.body.innerHTML = '<input type="password" value="hunter2" data-annotate-dom-target="r5">'
+      const result = runInPage('r5')
+      expect(result?.attributes['(value)']).toBe('[redacted]')
+      expect(result?.attributes.value).toBe('[redacted]')
+    })
+
+    it('strips the value attribute of a password input from the exported html', () => {
+      document.body.innerHTML = '<input type="password" value="hunter2" data-annotate-dom-target="r8">'
+      const html = runInPage('r8')?.html
+      expect(html).toContain('type="password"')
+      expect(html).not.toContain('hunter2')
+    })
+
+    it('strips the password values of fields inside the pinned element', () => {
+      document.body.innerHTML = '<form data-annotate-dom-target="r9"><input name="user" value="ada"><input type="password" value="hunter2"></form>'
+      const html = runInPage('r9')?.html
+      expect(html).toContain('value="ada"')
+      expect(html).not.toContain('hunter2')
+      expect(document.querySelector('input[type="password"]')?.getAttribute('value')).toBe('hunter2')
+    })
+
+    it('redacts the value of a pwd or otp search param', () => {
+      document.body.innerHTML = '<p data-annotate-dom-target="r6">x</p>'
+      history.replaceState(null, '', '/?pwd=a&otp=1&tab=b')
+      expect(runInPage('r6')?.interaction?.searchParams).toEqual([
+        { key: 'pwd', value: '[redacted]' },
+        { key: 'otp', value: '[redacted]' },
+        { key: 'tab', value: 'b' },
+      ])
+    })
+  })
+
   it('records the user agent beside the viewport', () => {
     document.body.innerHTML = '<button data-annotate-dom-target="m1">Save</button>'
     expect(runInPage('m1')?.viewport.userAgent).toBe(navigator.userAgent)

@@ -146,6 +146,54 @@ describe('createResolver', () => {
       expect(urls).toEqual([`${ORIGIN}/docs/__nextjs_original-stack-frames`, ENDPOINT])
     })
 
+    describe('where the stack-frames endpoint lives', () => {
+      const answers = (liveAt: string) => {
+        const urls: string[] = []
+        const fetcher: Fetcher = async url => {
+          urls.push(url)
+          return url === `${ORIGIN}${liveAt}/__nextjs_original-stack-frames` ? Response.json([fulfilled('/a.tsx', 1)]) : new Response('no', { status: 404 })
+        }
+        return { urls, fetcher }
+      }
+
+      it('retries once at the origin root when the script-derived base answers 404, then keeps the base that answered', async () => {
+        const { urls, fetcher } = answers('')
+        const resolver = createResolver({ pageOrigin: ORIGIN, fetcher, basePath: '/static' })
+        expect((await resolver.resolve(serverFrame(1)))?.file).toBe('/a.tsx')
+        expect((await resolver.resolve(serverFrame(1)))?.file).toBe('/a.tsx')
+        expect(urls).toEqual([`${ORIGIN}/static/__nextjs_original-stack-frames`, ENDPOINT, ENDPOINT])
+      })
+
+      it('goes straight through a real basePath', async () => {
+        const { urls, fetcher } = answers('/docs')
+        const resolver = createResolver({ pageOrigin: ORIGIN, fetcher, basePath: '/docs' })
+        expect((await resolver.resolve(serverFrame(1)))?.file).toBe('/a.tsx')
+        expect(urls).toEqual([`${ORIGIN}/docs/__nextjs_original-stack-frames`])
+      })
+
+      it('does not retry a failure that is not a 404', async () => {
+        const urls: string[] = []
+        const fetcher: Fetcher = async url => {
+          urls.push(url)
+          return new Response('boom', { status: 500 })
+        }
+        const resolver = createResolver({ pageOrigin: ORIGIN, fetcher, basePath: '/static' })
+        expect(await resolver.resolve(serverFrame(1))).toBeNull()
+        expect(urls).toHaveLength(1)
+      })
+
+      it.each(['//evil.example', '/\\evil.example', '///evil.example/x', '\\\\evil.example'])('keeps a hostile base %s on the page origin', async basePath => {
+        const urls: string[] = []
+        const fetcher: Fetcher = async url => {
+          urls.push(url)
+          return new Response('no', { status: 404 })
+        }
+        await createResolver({ pageOrigin: ORIGIN, fetcher, basePath }).resolve(serverFrame(1))
+        expect(urls.length).toBeGreaterThan(0)
+        for (const url of urls) expect(new URL(url).origin).toBe(ORIGIN)
+      })
+    })
+
     it('keeps the resolved file of a frame the dev server marks ignored, made absolute like any other', async () => {
       const fetcher: Fetcher = async () =>
         Response.json([
@@ -346,6 +394,36 @@ describe('createResolver', () => {
       const resolver = createResolver({ pageOrigin: ORIGIN, fetcher: async () => Response.json(body, { status: 500 }) })
       const loc = await resolver.resolve({ fn: 'P', file: 'about://React/Server/file:///a/.next/x.js', line: 1, column: 1 })
       expect(loc).toBeNull()
+    })
+
+    it('resolves a frame to null on a non-2xx from the chunk, the source map and the dev server alike', async () => {
+      const serverFrame = { fn: 'P', file: 'about://React/Server/file:///a/.next/x.js', line: 1, column: 1 }
+      const ok = (url: string) => (url.endsWith('.map') ? new Response(sectionedMap) : new Response(chunk))
+      const cases = {
+        chunk: (url: string) => (url === chunkUrl(0) ? new Response('x', { status: 503 }) : ok(url)),
+        map: (url: string) => (url.endsWith('.map') ? new Response('x', { status: 503 }) : ok(url)),
+        server: () => Response.json([{ status: 'fulfilled', value: { originalStackFrame: { file: 'a.tsx', line1: 1, column1: 1 } } }], { status: 503 }),
+      }
+      for (const [name, respond] of Object.entries(cases)) {
+        const fetcher: Fetcher = async url => respond(url)
+        const frame = name === 'server' ? serverFrame : frameOn(0)
+        expect(await createResolver({ pageOrigin: ORIGIN, fetcher }).resolve(frame), name).toBeNull()
+      }
+    })
+
+    it('settles a mixed resolveAll at the deadline when the dev server never answers, keeping the client frames', async () => {
+      vi.useFakeTimers()
+      const fetcher: Fetcher = url => {
+        if (url.endsWith('/__nextjs_original-stack-frames')) return new Promise<Response>(() => {})
+        if (url.endsWith('.map')) return Promise.resolve(new Response(sectionedMap))
+        return Promise.resolve(new Response(chunk.replace('abc._.js.map', `${url.split('/').at(-1)}.map`)))
+      }
+      const resolver = createResolver({ pageOrigin: ORIGIN, fetcher })
+      const server = { fn: 'S', file: 'about://React/Server/file:///a/.next/x.js', line: 1, column: 1 }
+      const pending = resolver.resolveAll([frameOn(0), server, frameOn(1), server])
+      await vi.advanceTimersByTimeAsync(RESOLVE_DEADLINE_MS)
+      const client = { file: '/Users/me/app/components/theme-toggle.tsx', line: 2, column: 1 }
+      expect(await pending).toEqual([client, null, client, null])
     })
 
     it('resolves null entries and keeps input order', async () => {

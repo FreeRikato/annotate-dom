@@ -238,6 +238,33 @@ test('Shift+click copies one element without a pin or screenshot, and a plain cl
   await tab.close()
 })
 
+test('Shift+click shows the markdown in the panel when both clipboard paths fail', async () => {
+  const tab = await context.newPage()
+  await tab.bringToFront()
+  const tabOverlay = tab.locator('annotate-dom-root')
+  await tab.goto(`${fixtureUrl}/settings`)
+  await toggleOverlay()
+  await expect(tabOverlay.locator('.panel')).toBeVisible()
+  const session = await context.newCDPSession(tab)
+  const contentWorlds: number[] = []
+  session.on('Runtime.executionContextCreated', ({ context: world }) => {
+    if (world.origin.startsWith('chrome-extension://')) contentWorlds.push(world.id)
+  })
+  await session.send('Runtime.enable')
+  const stubs = `
+    navigator.clipboard.writeText = () => Promise.reject(new DOMException('blocked', 'NotAllowedError'))
+    document.execCommand = () => false
+  `
+  for (const contextId of contentWorlds) await session.send('Runtime.evaluate', { contextId, expression: stubs })
+  await session.detach()
+
+  await tab.locator('#theme').click({ modifiers: ['Shift'] })
+
+  await expect(tabOverlay.locator('.toast span')).toHaveText('Clipboard blocked; markdown is in the panel.', { timeout: 20_000 })
+  expect(await tabOverlay.locator('.fallback textarea').inputValue()).toContain('- Selector: `')
+  await tab.close()
+})
+
 test('text highlighted before a normal pin reaches Copy all', async () => {
   const tab = await context.newPage()
   await tab.bringToFront()

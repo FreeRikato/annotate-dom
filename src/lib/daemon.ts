@@ -1,4 +1,4 @@
-import type { Box, DetailLevel, Inspection, Pin } from './types'
+import { isDetailLevel, type Box, type DetailLevel, type Inspection, type Pin } from './types'
 
 export const DAEMON_URL = 'ws://localhost:4747/ws'
 export const PING_MS = 20_000
@@ -7,6 +7,12 @@ export const MAX_RETRY_MS = 5_000
 export const SEND_TIMEOUT_MS = 30_000
 export const TARGET_ATTR = 'data-annotate-dom-target'
 export const SETTINGS_KEY = 'settings'
+
+export function parseSavedLevel(settings: unknown): DetailLevel | undefined {
+  const level = typeof settings === 'object' && settings !== null && 'level' in settings ? settings.level : undefined
+  return isDetailLevel(level) ? level : undefined
+}
+
 export type BatchFrame = {
   readonly type: 'batch'
   readonly reqId: string

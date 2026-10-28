@@ -72,4 +72,4 @@ bun run test:server    # daemon, MCP and launchd script tests (bun test)
 bun run test:e2e       # builds dist-test/ and runs Playwright
 ```
 
-The Send, button-state and recapture specs serve their own fixture page and start a daemon on port 4747 with a temporary HOME, so stop a running daemon first (they skip when the port is taken). The Copy all spec runs against APP_URL (default http://localhost:3000) and skips when it is not reachable. It pins the theme toggle on granite-inventory-management's `/login`; set `APP_URL` and `APP_ROOT` to point it at another app.
+The Send, button-state and recapture specs serve their own fixture page and start a daemon on port 4747 with a temporary HOME, so stop a running daemon first (they skip when the port is taken). The Copy all spec runs against APP_URL (default http://localhost:3000) and fails when it is not reachable; set `SKIP_APP_SPEC=1` to skip it. It pins the theme toggle on granite-inventory-management's `/login`; set `APP_URL` and `APP_ROOT` to point it at another app.
