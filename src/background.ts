@@ -141,7 +141,7 @@ async function exportBatch({ tabId, origin }: { readonly tabId: number; readonly
   const paths = [...new Set(batch.pins.map(p => p.path))]
   const pages: ExportPage[] = []
   let n = 0
-  for (const path of paths) {
+  for (const [pageIndex, path] of paths.entries()) {
     const numbers = new Map<string, number>()
     const pins = []
     for (const pin of batch.pins.filter(p => p.path === path)) {
@@ -151,7 +151,7 @@ async function exportBatch({ tabId, origin }: { readonly tabId: number; readonly
     }
     const shot = batch.viewports[path]
     const viewportFile = shot
-      ? await download({ url: await numberedViewport({ shot, numbers }), filename: `${prefix}-${slug(path)}-viewport.png` })
+      ? await download({ url: await numberedViewport({ shot, numbers }), filename: `${prefix}-${pageIndex + 1}-${slug(path)}-viewport.png` })
       : null
     pages.push({ path, url: pins[0]?.pin.url ?? origin + path, viewportFile, pins })
   }

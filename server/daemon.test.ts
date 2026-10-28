@@ -78,7 +78,7 @@ test('a 3-pin batch is written into the project and the reply names folder and p
     prompt: 'Fix the annotations in .annotations/2026-10-27-1405-settings/',
   })
   const files = await readdir(join(project, '.annotations/2026-10-27-1405-settings'))
-  expect(files.sort()).toEqual(['batch.json', 'batch.md', 'pin-1.png', 'pin-2.png', 'pin-3.png', 'viewport-settings.png'])
+  expect(files.sort()).toEqual(['batch.json', 'batch.md', 'pin-1.png', 'pin-2.png', 'pin-3.png', 'viewport-1-settings.png'])
 })
 
 test('ping is answered with pong', async () => {

@@ -48,7 +48,7 @@ export type WrittenBatch = { readonly folder: string; readonly prompt: string }
 const ANNOTATIONS_DIR = '.annotations'
 
 function slug(path: string): string {
-  return path.replace(/[^A-Za-z0-9]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'index'
+  return path.replace(/[^A-Za-z0-9]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase().slice(0, 60).replace(/-+$/, '') || 'index'
 }
 
 function stamp(ms: number): string {
@@ -142,10 +142,10 @@ export async function writeBatch({ root, home, batch }: {
   const firstPage = batch.pages[0]?.path ?? '/'
   const folder = await claimFolder(join(root, ANNOTATIONS_DIR), `${stamp(batch.createdAt)}-${slug(firstPage)}`)
   const dir = join(root, ANNOTATIONS_DIR, folder)
-  const pages = batch.pages.map(page => ({
+  const pages = batch.pages.map((page, i) => ({
     path: page.path,
     url: page.url,
-    viewportFile: page.viewport ? `viewport-${slug(page.path)}.png` : null,
+    viewportFile: page.viewport ? `viewport-${i + 1}-${slug(page.path)}.png` : null,
   }))
   const stored: StoredBatch = {
     version: 1, folder, project: root, origin: batch.origin, createdAt: batch.createdAt,
