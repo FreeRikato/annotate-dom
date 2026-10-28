@@ -122,6 +122,7 @@ function pinSection({ pin, cropFile, excerpts = [] }: ExportPin, n: number): str
     }
   }
   if (ins.text) lines.push(`- Text: ${code(ins.text.replace(/\s+/g, ' '))}`)
+  if (ins.selectedText) lines.push(`- ${selectedTextLine(ins.selectedText)}`)
   lines.push(`- Box: x=${ins.box.x} y=${ins.box.y} w=${ins.box.w} h=${ins.box.h}`)
   if (ins.boxModel) lines.push(boxModelLine(ins.boxModel))
   const styles = styleLine(ins.styles, k => ins.boxModel !== undefined && BOX_SHORTHANDS.includes(k))
@@ -162,9 +163,15 @@ function pinSection({ pin, cropFile, excerpts = [] }: ExportPin, n: number): str
   return lines
 }
 
-function compactLine({ pin }: ExportPin, n: number): string {
+function selectedTextLine(text: string): string {
+  return `Selected text: ${JSON.stringify(text)}`
+}
+
+function compactLine({ pin }: ExportPin, n: number): string[] {
   const site = pin.elementSite
-  return `${n}. **${pin.inspection.selector}** (${site ? `${site.file}:${site.line}` : 'no source'}): ${pin.note.split('\n')[0]}`
+  const { selectedText } = pin.inspection
+  const line = `${n}. **${pin.inspection.selector}** (${site ? `${site.file}:${site.line}` : 'no source'}): ${pin.note.split('\n')[0]}`
+  return selectedText ? [line, selectedTextLine(selectedText)] : [line]
 }
 
 function environment(page: ExportPage): string[] {
@@ -197,7 +204,7 @@ export function toMarkdown({ origin, createdAt, pages, level = 'standard' }: {
   if (level === 'compact') {
     for (const page of pages) {
       out.push('', `## ${page.path}`, '')
-      for (const pin of page.pins) out.push(compactLine(pin, ++n))
+      for (const pin of page.pins) out.push(...compactLine(pin, ++n))
     }
     return out.join('\n') + '\n'
   }

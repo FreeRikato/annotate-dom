@@ -106,6 +106,7 @@ export type Inspection = {
   readonly tokens?: DesignTokens
   readonly locator?: string | null
   readonly a11y?: Accessibility
+  readonly selectedText?: string
 }
 
 export type SourceLoc = { readonly file: string; readonly line: number; readonly column: number }
