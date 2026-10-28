@@ -1,10 +1,10 @@
 import { axeViolations, inspectElement } from './inspect'
 import {
-  clearRecaptureTarget, createDaemonClient, createRecaptureHandler, DAEMON_URL, markRecaptureTarget, TARGET_ATTR, waitForQuiet, webSocketFactory,
+  clearRecaptureTarget, createDaemonClient, createRecaptureHandler, DAEMON_URL, markRecaptureTarget, SETTINGS_KEY, TARGET_ATTR, waitForQuiet, webSocketFactory,
 } from './lib/daemon'
 import { toMarkdown, type ExportPage } from './lib/markdown'
 import { assertNever, hasRequestKind, type Reply, type Request, type Responses } from './lib/messages'
-import { emptyBatch, type Batch, type Box, type Inspection, type ViewportShot } from './lib/types'
+import { emptyBatch, isDetailLevel, type Batch, type Box, type DetailLevel, type Inspection, type ViewportShot } from './lib/types'
 
 const batchKey = (tabId: number) => `batch:${tabId}`
 const undoKey = (tabId: number) => `undo:${tabId}`
@@ -18,6 +18,13 @@ async function read(key: string): Promise<Batch | null> {
   const stored: Record<string, unknown> = await chrome.storage.local.get(key)
   const value = stored[key]
   return isBatch(value) ? value : null
+}
+
+async function savedLevel(): Promise<DetailLevel> {
+  const stored: Record<string, unknown> = await chrome.storage.local.get(SETTINGS_KEY)
+  const settings = stored[SETTINGS_KEY]
+  const level = typeof settings === 'object' && settings !== null && 'level' in settings ? settings.level : undefined
+  return isDetailLevel(level) ? level : 'standard'
 }
 
 async function writeBatch(tabId: number, batch: Batch): Promise<Batch> {
@@ -155,7 +162,7 @@ async function exportBatch({ tabId, origin }: { readonly tabId: number; readonly
       : null
     pages.push({ path, url: pins[0]?.pin.url ?? origin + path, viewportFile, pins })
   }
-  const markdown = toMarkdown({ origin, createdAt: now, pages })
+  const markdown = toMarkdown({ origin, createdAt: now, pages, level: await savedLevel() })
   await chrome.storage.local.set({ [undoKey(tabId)]: batch })
   await writeBatch(tabId, emptyBatch)
   return { markdown, count: n }
@@ -178,7 +185,7 @@ async function sendBatch({ tabId, origin }: { readonly tabId: number; readonly o
       viewport: shot ? await numberedViewport({ shot, numbers }) : null,
     })
   }
-  const saved = await daemon.send({ origin, createdAt: Date.now(), pages, pins })
+  const saved = await daemon.send({ origin, createdAt: Date.now(), pages, pins, level: await savedLevel() })
   await writeBatch(tabId, emptyBatch)
   return { count: pins.length, folder: saved.folder, prompt: saved.prompt }
 }

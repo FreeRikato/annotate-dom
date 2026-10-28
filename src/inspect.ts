@@ -443,7 +443,7 @@ export function inspectElement(marker: string): Inspection | null {
     styles: pick(el, STYLE_KEYS),
     attributes: attributes(el),
     ancestors,
-    viewport: { width: innerWidth, height: innerHeight, dpr: devicePixelRatio },
+    viewport: { width: innerWidth, height: innerHeight, dpr: devicePixelRatio, userAgent: navigator.userAgent },
     react: fiber ? { elementStack: stackOf(fiber._debugStack), owners: owners(fiber._debugOwner) } : null,
     ...recorded(),
     queries: querySnapshots(fiber),

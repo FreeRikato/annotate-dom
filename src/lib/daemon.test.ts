@@ -6,7 +6,12 @@ import {
   type RecaptureTabs, type SocketHandlers, type SocketLike,
 } from './daemon'
 import { inspectElement } from '../inspect'
-import type { Inspection } from './types'
+import { isDetailLevel, type Inspection } from './types'
+
+describe('isDetailLevel', () => {
+  it.each(['compact', 'standard', 'forensic'])('accepts %s', level => expect(isDetailLevel(level)).toBe(true))
+  it.each(['loud', '', 3, null, undefined])('rejects %s', value => expect(isDetailLevel(value)).toBe(false))
+})
 
 class FakeSocket implements SocketLike {
   sent: unknown[] = []

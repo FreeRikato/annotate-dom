@@ -55,6 +55,7 @@ test.beforeAll(async () => {
   context = await chromium.launchPersistentContext(mkdtempSync(join(tmpdir(), 'annotate-dom-profile-')), {
     channel: 'chromium',
     headless: true,
+    permissions: ['clipboard-read', 'clipboard-write'],
     viewport: { width: 1280, height: 800 },
     args: [`--disable-extensions-except=${EXTENSION}`, `--load-extension=${EXTENSION}`],
   })
@@ -96,4 +97,59 @@ test('a pin made on #/a shows under #/a only, and an anchor jump keeps the curre
   await page.evaluate(() => (location.hash = '#top'))
   await expect(overlay.locator('.marker')).toHaveCount(1)
   await expect(overlay.locator('.list .group').filter({ hasText: '(this page)' })).toHaveText('/router (this page)')
+})
+
+test('the chosen detail level shapes Copy all and survives closing the overlay and reloading the tab', async () => {
+  const tab = await context.newPage()
+  await tab.bringToFront()
+  const tabOverlay = tab.locator('annotate-dom-root')
+  await tab.goto(`${fixtureUrl}/settings`)
+  await toggleOverlay()
+  await expect(tabOverlay.locator('.panel')).toBeVisible()
+  await expect(tabOverlay.getByLabel('Detail level')).toHaveValue('standard')
+
+  await tabOverlay.getByLabel('Detail level').selectOption('compact')
+  await tab.locator('#theme').click()
+  await tabOverlay.locator('.editor textarea').fill('toggle needs less padding')
+  await tabOverlay.locator('.editor textarea').press('Enter')
+  await expect(tabOverlay.locator('.title')).toHaveText('annotate-dom (1)', { timeout: 20_000 })
+  await tabOverlay.getByRole('button', { name: 'Copy all' }).click()
+  await expect(tabOverlay.locator('.toast')).toContainText('Copied 1 annotation', { timeout: 20_000 })
+  const markdown = await tab.evaluate(() => navigator.clipboard.readText())
+  expect(markdown).toMatch(/^1\. \*\*.+\*\* \(.+\): toggle needs less padding$/m)
+  expect(markdown).not.toContain('### 1.')
+
+  await toggleOverlay()
+  await expect(tabOverlay.locator('.panel')).toBeHidden()
+  await toggleOverlay()
+  await expect(tabOverlay.getByLabel('Detail level')).toHaveValue('compact')
+
+  await tab.reload()
+  await toggleOverlay()
+  await expect(tabOverlay.locator('.panel')).toBeVisible()
+  await expect(tabOverlay.getByLabel('Detail level')).toHaveValue('compact')
+  await tabOverlay.getByLabel('Detail level').selectOption('standard')
+  await tab.close()
+})
+
+test('the level menu follows a level saved from another tab', async () => {
+  const first = await context.newPage()
+  const second = await context.newPage()
+  const firstOverlay = first.locator('annotate-dom-root')
+  const secondOverlay = second.locator('annotate-dom-root')
+  await first.goto(`${fixtureUrl}/settings`)
+  await first.bringToFront()
+  await toggleOverlay()
+  await expect(firstOverlay.getByLabel('Detail level')).toHaveValue('standard')
+  await second.goto(`${fixtureUrl}/settings`)
+  await second.bringToFront()
+  await toggleOverlay()
+  await expect(secondOverlay.getByLabel('Detail level')).toHaveValue('standard')
+
+  await secondOverlay.getByLabel('Detail level').selectOption('compact')
+  await expect(firstOverlay.getByLabel('Detail level')).toHaveValue('compact')
+
+  await secondOverlay.getByLabel('Detail level').selectOption('standard')
+  await first.close()
+  await second.close()
 })

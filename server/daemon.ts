@@ -1,4 +1,4 @@
-import { PROJECT_ROOT_NOT_FOUND } from '../src/lib/types'
+import { isDetailLevel, PROJECT_ROOT_NOT_FOUND } from '../src/lib/types'
 import { type WireBatch, writeBatch } from './batch'
 import { handleMcp } from './mcp'
 import { createExtensionLink, isRecaptureResult } from './recapture'
@@ -42,10 +42,10 @@ function parseJson(text: string): unknown {
 }
 
 function parseBatchFrame(frame: Record<string, unknown>): BatchFrame | null {
-  const { reqId, origin, createdAt, pages, pins } = frame
+  const { reqId, origin, createdAt, pages, pins, level } = frame
   if (typeof reqId !== 'string' || typeof origin !== 'string' || typeof createdAt !== 'number') return null
   if (!Array.isArray(pages) || !pages.every(isWirePage) || !Array.isArray(pins) || !pins.every(isWirePin)) return null
-  return { reqId, batch: { origin, createdAt, pages, pins } }
+  return { reqId, batch: { origin, createdAt, pages, pins, level: isDetailLevel(level) ? level : undefined } }
 }
 
 function sourceFiles(batch: WireBatch): string[] {

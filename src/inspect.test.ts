@@ -73,6 +73,11 @@ describe('inspectElement', () => {
     expect(JSON.parse(owners[1].props ?? 'null')).toEqual({ params: {} })
   })
 
+  it('records the user agent beside the viewport', () => {
+    document.body.innerHTML = '<button data-annotate-dom-target="m1">Save</button>'
+    expect(runInPage('m1')?.viewport.userAgent).toBe(navigator.userAgent)
+  })
+
   it('collects up to 20 owners nearest first, each with props', () => {
     document.body.innerHTML = '<button data-annotate-dom-target="m3">Go</button>'
     const button = document.querySelector('button')

@@ -1,5 +1,5 @@
 import { classifySourcePath } from './callsites'
-import type { Pin, SourceLoc } from './types'
+import type { DetailLevel, Pin, SourceLoc } from './types'
 
 export type Excerpt = { readonly file: string; readonly line: number; readonly startLine: number; readonly code: string }
 
@@ -125,23 +125,51 @@ function pinSection({ pin, cropFile, excerpts = [] }: ExportPin, n: number): str
   return lines
 }
 
-export function toMarkdown({ origin, createdAt, pages }: {
+function compactLine({ pin }: ExportPin, n: number): string {
+  const site = pin.elementSite
+  return `${n}. **${pin.inspection.selector}** (${site ? `${site.file}:${site.line}` : 'no source'}): ${pin.note.split('\n')[0]}`
+}
+
+function environment(page: ExportPage): string[] {
+  const first = page.pins[0]?.pin
+  if (!first) return []
+  const { viewport } = first.inspection
+  return [
+    '- Environment:',
+    `  - Viewport: ${viewport.width}x${viewport.height}`,
+    `  - DPR: ${viewport.dpr}`,
+    `  - User agent: ${viewport.userAgent ?? 'unknown'}`,
+    `  - URL: ${page.url}`,
+    `  - Captured: ${stamp(first.createdAt)}`,
+  ]
+}
+
+export function toMarkdown({ origin, createdAt, pages, level = 'standard' }: {
   readonly origin: string
   readonly createdAt: number
   readonly pages: readonly ExportPage[]
+  readonly level?: DetailLevel
 }): string {
   const total = pages.reduce((sum, p) => sum + p.pins.length, 0)
   const out = [
     `# annotate-dom: ${origin} (${stamp(createdAt)})`,
     '',
-    `${total} annotation${total === 1 ? '' : 's'} on ${pages.length} page${pages.length === 1 ? '' : 's'}. Screenshots are PNG files; open them by path. Each numbered section is one change request.`,
+    `${total} annotation${total === 1 ? '' : 's'} on ${pages.length} page${pages.length === 1 ? '' : 's'}. ${level === 'compact' ? 'Each numbered line is one change request.' : 'Screenshots are PNG files; open them by path. Each numbered section is one change request.'}`,
   ]
   let n = 0
+  if (level === 'compact') {
+    for (const page of pages) {
+      out.push('', `## ${page.path}`, '')
+      for (const pin of page.pins) out.push(compactLine(pin, ++n))
+    }
+    return out.join('\n') + '\n'
+  }
   for (const page of pages) {
     const vp = page.pins[0]?.pin.inspection.viewport
     out.push('', `## ${page.path}`, '', `- URL: ${page.url}`)
     if (vp) out.push(`- Viewport: ${vp.width}x${vp.height} @${vp.dpr}x`)
     out.push(`- Viewport screenshot (pins numbered): ${page.viewportFile ?? 'not saved'}`)
+    if (level === 'forensic') out.push(...environment(page))
     for (const pin of page.pins) {
       n += 1
       out.push('', ...pinSection(pin, n))
