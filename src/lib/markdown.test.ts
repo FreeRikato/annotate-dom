@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { toMarkdown } from './markdown'
+import { type ExportPage, toMarkdown } from './markdown'
 import type { Inspection, Pin } from './types'
+
+function firstPage({ pages }: { readonly pages: readonly ExportPage[] }): ExportPage {
+  const [page] = pages
+  if (!page) throw new Error('batch has no page')
+  return page
+}
 
 const inspection: Inspection = {
   selector: 'form > button[type="submit"]',
@@ -289,5 +295,86 @@ describe('toMarkdown call sites', () => {
   it('prints a library element site on the Source line by package', () => {
     const md = render('/app/node_modules/.pnpm/next@16.3.4_x/node_modules/next/dist/rsc.js')
     expect(md).toContain('- Source: library code in next (`<button>` element)')
+  })
+})
+
+describe('toMarkdown detail levels', () => {
+  const batch = (count: number) => ({
+    origin: 'http://localhost:3000',
+    createdAt: new Date(2026, 9, 26, 14, 2).getTime(),
+    pages: [
+      {
+        path: '/inventory/new',
+        url: 'http://localhost:3000/inventory/new',
+        viewportFile: '/dl/vp1.png',
+        pins: Array.from({ length: count }, (_, i) => ({
+          pin: pin(`p${i}`, '/inventory/new', `note ${i}\nsecond line ${i}`),
+          cropFile: `/dl/${i}.png`,
+        })),
+      },
+    ],
+  })
+
+  it('renders no level exactly as standard', () => {
+    expect(toMarkdown(batch(2))).toBe(toMarkdown({ ...batch(2), level: 'standard' }))
+  })
+
+  it('prints one line per pin in compact and nothing else per pin', () => {
+    const md = toMarkdown({ ...batch(2), level: 'compact' })
+    expect(md).toContain('1. **form > button[type="submit"]** (/app/components/ui/button.tsx:58): note 0\n')
+    expect(md).toContain('2. **form > button[type="submit"]** (/app/components/ui/button.tsx:58): note 1\n')
+    for (const absent of ['- Styles:', '- Attributes:', '- Parents', '- HTML', '- Screenshot', 'second line', '````']) {
+      expect(md).not.toContain(absent)
+    }
+  })
+
+  it('prints "no source" in compact when the element has no source', () => {
+    const [{ pin: first }] = firstPage(batch(1)).pins
+    const md = toMarkdown({
+      ...batch(1),
+      level: 'compact',
+      pages: [{ ...firstPage(batch(1)), pins: [{ pin: { ...first, elementSite: null }, cropFile: null }] }],
+    })
+    expect(md).toContain('1. **form > button[type="submit"]** (no source): note 0\n')
+  })
+
+  it('keeps compact at or under a fifth of standard on 10 pins', () => {
+    const standard = toMarkdown(batch(10)).length
+    const compact = toMarkdown({ ...batch(10), level: 'compact' }).length
+    console.log(`compact/standard on 10 pins: ${compact}/${standard} = ${(compact / standard).toFixed(3)}`)
+    expect(compact * 5).toBeLessThanOrEqual(standard)
+  })
+
+  it('prints an Environment block per page in forensic, and none in standard', () => {
+    const withAgent = pin('a', '/inventory/new', 'x')
+    const stamped = {
+      ...withAgent,
+      createdAt: new Date(2026, 9, 26, 14, 5).getTime(),
+      inspection: { ...inspection, viewport: { width: 1440, height: 900, dpr: 2, userAgent: 'Mozilla/5.0 Test' } },
+    }
+    const input = { ...batch(1), pages: [{ ...firstPage(batch(1)), pins: [{ pin: stamped, cropFile: null }] }] }
+    const md = toMarkdown({ ...input, level: 'forensic' })
+    expect(md).toContain('- Environment:\n  - Viewport: 1440x900\n  - DPR: 2\n  - User agent: Mozilla/5.0 Test\n  - URL: http://localhost:3000/inventory/new\n  - Captured: 2026-10-26 14:05\n')
+    expect(md).toContain('- Styles:')
+    expect(toMarkdown(input)).not.toContain('Environment')
+  })
+
+  it('says the user agent is unknown when capture did not record one', () => {
+    expect(toMarkdown({ ...batch(1), level: 'forensic' })).toContain('  - User agent: unknown\n')
+  })
+
+  it('does not mention screenshots in the compact intro', () => {
+    expect(toMarkdown({ ...batch(1), level: 'compact' })).not.toContain('Screenshots')
+  })
+
+  it('prints no Environment block for a page without pins', () => {
+    const empty = { ...batch(1), pages: [{ ...firstPage(batch(1)), pins: [] }] }
+    expect(toMarkdown({ ...empty, level: 'forensic' })).not.toContain('Environment')
+  })
+
+  it('has no em dashes at any level', () => {
+    for (const level of ['compact', 'standard', 'forensic'] as const) {
+      expect(toMarkdown({ ...batch(2), level })).not.toContain('—')
+    }
   })
 })

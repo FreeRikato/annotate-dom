@@ -74,6 +74,8 @@ export type Accessibility = {
   readonly violations: readonly AxeViolation[]
 }
 
+export type DetailLevel = 'compact' | 'standard' | 'forensic'
+
 export type Inspection = {
   readonly selector: string
   readonly tag: string
@@ -84,7 +86,7 @@ export type Inspection = {
   readonly styles: Readonly<Record<string, string>>
   readonly attributes: Readonly<Record<string, string>>
   readonly ancestors: readonly Ancestor[]
-  readonly viewport: { readonly width: number; readonly height: number; readonly dpr: number }
+  readonly viewport: { readonly width: number; readonly height: number; readonly dpr: number; readonly userAgent?: string }
   readonly react: ReactSnapshot | null
   readonly console?: readonly ConsoleEvent[]
   readonly network?: readonly NetworkEvent[]
