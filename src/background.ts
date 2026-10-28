@@ -190,12 +190,13 @@ async function sendBatch({ tabId, origin }: { readonly tabId: number; readonly o
 
 async function inspectTab({ tabId, frameId, marker }: { readonly tabId: number; readonly frameId: number; readonly marker: string }): Promise<Inspection | null> {
   const target = { tabId, frameIds: [frameId] }
-  const [axePresent] = await chrome.scripting.executeScript({
-    target,
+  const frames = await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
     world: 'MAIN',
     func: () => Reflect.has(window, 'axe'),
   })
-  if (!axePresent?.result) await chrome.scripting.executeScript({ target, world: 'MAIN', files: ['axe.min.js'] })
+  const withoutAxe = frames.filter(frame => !frame.result).map(frame => frame.frameId)
+  if (withoutAxe.length) await chrome.scripting.executeScript({ target: { tabId, frameIds: withoutAxe }, world: 'MAIN', files: ['axe.min.js'] })
   const [result] = await chrome.scripting.executeScript({
     target,
     world: 'MAIN',

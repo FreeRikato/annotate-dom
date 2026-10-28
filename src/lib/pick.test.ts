@@ -1,5 +1,7 @@
 // @vitest-environment happy-dom
+import { Window } from 'happy-dom'
 import { beforeEach, describe, expect, it } from 'vitest'
+import { deepCandidates, isSealedFrame, topRect } from './deep'
 import { pickTarget } from './pick'
 
 const viewport = { width: 1000, height: 800 }
@@ -106,5 +108,93 @@ describe('pickTarget', () => {
   it('returns null when nothing is left', () => {
     expect(pick([box('display: none'), box('pointer-events: none')])).toBeNull()
     expect(pick([])).toBeNull()
+  })
+})
+
+describe('deepCandidates', () => {
+  function stubPoint(root: Document | ShadowRoot, hits: Element[]) {
+    Object.defineProperty(root, 'elementsFromPoint', { value: () => hits, configurable: true })
+  }
+
+  function frameAt(parent: Element, left: number, top: number, inner: unknown): Element {
+    const frame = document.createElement('div')
+    frame.setAttribute('id', 'frame')
+    frame.getBoundingClientRect = () => new DOMRect(left, top, 400, 300)
+    Object.defineProperty(frame, 'localName', { value: 'iframe' })
+    Object.defineProperty(frame, 'contentDocument', { value: inner })
+    parent.append(frame)
+    return frame
+  }
+
+  beforeEach(() => {
+    document.body.replaceChildren()
+  })
+
+  it('lists a shadow root element before its host and the host before the page', () => {
+    const host = box('')
+    const inner = document.createElement('button')
+    const root = host.attachShadow({ mode: 'open' })
+    root.append(inner)
+    stubPoint(document, [host, document.body])
+    stubPoint(root, [inner, host])
+    expect(deepCandidates(document, 5, 5, document.createElement('x'))).toEqual([inner, host, document.body])
+  })
+
+  it('descends into a same-origin iframe with the pointer shifted by the frame box', () => {
+    const inner = new Window().document
+    const target = document.createElement('button')
+    Object.defineProperty(target, 'getRootNode', { value: () => inner })
+    const frame = frameAt(document.body, 100, 50, inner)
+    stubPoint(document, [frame])
+    const seen: number[][] = []
+    Object.defineProperty(inner, 'elementsFromPoint', { value: (x: number, y: number) => (seen.push([x, y]), [target]) })
+    expect(deepCandidates(document, 130, 90, document.createElement('x'))).toEqual([target, frame])
+    expect(seen).toEqual([[30, 40]])
+  })
+
+  it('does not descend into the overlay host', () => {
+    const overlay = box('')
+    const hidden = document.createElement('button')
+    const root = overlay.attachShadow({ mode: 'open' })
+    root.append(hidden)
+    stubPoint(document, [overlay])
+    stubPoint(root, [hidden, overlay])
+    expect(deepCandidates(document, 5, 5, overlay)).toEqual([overlay])
+  })
+
+  it('keeps a cross-origin iframe as the candidate and marks it sealed', () => {
+    const frame = frameAt(document.body, 0, 0, null)
+    stubPoint(document, [frame])
+    expect(deepCandidates(document, 5, 5, document.createElement('x'))).toEqual([frame])
+    expect(isSealedFrame(frame)).toBe(true)
+  })
+
+  it('reports an element in an iframe at top-page coordinates', () => {
+    const inner = new Window().document
+    const target = document.createElement('button')
+    Object.defineProperty(target, 'ownerDocument', { value: inner })
+    target.getBoundingClientRect = () => new DOMRect(10, 20, 30, 40)
+    const frame = frameAt(document.body, 100, 50, inner)
+    Object.defineProperty(inner.defaultView, 'frameElement', { value: frame })
+    expect(topRect(target)).toMatchObject({ x: 110, y: 70, width: 30, height: 40 })
+  })
+
+  it('counts the frame border and padding in the hit-test shift and in an element rect', () => {
+    const inner = new Window().document
+    const target = document.createElement('button')
+    Object.defineProperty(target, 'getRootNode', { value: () => inner })
+    Object.defineProperty(target, 'ownerDocument', { value: inner })
+    target.getBoundingClientRect = () => new DOMRect(10, 20, 30, 40)
+    const frame = frameAt(document.body, 100, 50, inner)
+    frame.setAttribute('style', 'padding: 6px 4px')
+    Object.defineProperty(frame, 'clientLeft', { value: 2 })
+    Object.defineProperty(frame, 'clientTop', { value: 3 })
+    Object.defineProperty(inner.defaultView, 'frameElement', { value: frame })
+    stubPoint(document, [frame])
+    const seen: number[][] = []
+    Object.defineProperty(inner, 'elementsFromPoint', { value: (x: number, y: number) => (seen.push([x, y]), [target]) })
+    deepCandidates(document, 130, 90, document.createElement('x'))
+    expect(seen).toEqual([[24, 31]])
+    expect(topRect(target)).toMatchObject({ x: 116, y: 79 })
   })
 })

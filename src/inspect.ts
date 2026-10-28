@@ -20,6 +20,7 @@ export function inspectElement(marker: string): Inspection | null {
   const HOVERED_ATTR = 'data-annotate-dom-hovered'
   const SECRET_SUBSTRING = /token|secret|password|key|session|auth|cookie|pwd|passcode|credential/i
   const SECRET_WORDS = new Set(['pin', 'otp'])
+  const XHTML = 'http://www.w3.org/1999/xhtml'
   const VAR_REFERENCE = /var\(\s*(--[^\s,)]+)/g
   const JWT = /^eyJ[\w-]*\.[\w-]*\.[\w-]*$/
   const HTML_LIMIT = 10000
@@ -45,11 +46,64 @@ export function inspectElement(marker: string): Inspection | null {
     range: 'slider', search: 'searchbox', text: 'textbox', email: 'textbox', tel: 'textbox', url: 'textbox', number: 'spinbutton',
   }
 
-  const el = document.querySelector(`[${ATTR}="${marker}"]`)
-  if (!el) return null
-
   function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null
+  }
+
+  function isElement(value: unknown): value is Element {
+    return isRecord(value) && value.nodeType === 1
+  }
+
+  function isDocument(value: unknown): value is Document {
+    return isRecord(value) && value.nodeType === 9
+  }
+
+  function isShadowRoot(value: unknown): value is ShadowRoot {
+    return isRecord(value) && value.nodeType === 11 && isElement(value.host)
+  }
+
+  function isParentNode(value: unknown): value is ParentNode {
+    return isRecord(value) && typeof value.querySelectorAll === 'function'
+  }
+
+  function hasTag(node: Element, tag: string): boolean {
+    return node.localName === tag && node.namespaceURI === XHTML
+  }
+
+  function isHtml(node: Element): node is HTMLElement {
+    return node.namespaceURI === XHTML
+  }
+
+  function isInput(node: Element): node is HTMLInputElement {
+    return hasTag(node, 'input')
+  }
+
+  function isSelect(node: Element): node is HTMLSelectElement {
+    return hasTag(node, 'select')
+  }
+
+  function isTextArea(node: Element): node is HTMLTextAreaElement {
+    return hasTag(node, 'textarea')
+  }
+
+  function isButton(node: Element): node is HTMLButtonElement {
+    return hasTag(node, 'button')
+  }
+
+  function isFieldSet(node: Element): node is HTMLFieldSetElement {
+    return hasTag(node, 'fieldset')
+  }
+
+  function isOption(node: Element): node is HTMLOptionElement {
+    return hasTag(node, 'option')
+  }
+
+  function isImage(node: Element): node is HTMLImageElement {
+    return hasTag(node, 'img')
+  }
+
+  function isPasswordInput(node: Element): node is HTMLInputElement {
+    return isInput(node) && node.type === 'password'
   }
 
   function isSecretKey(key: string): boolean {
@@ -57,6 +111,28 @@ export function inspectElement(marker: string): Inspection | null {
     const words = key.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2').split(/[^A-Za-z0-9]+/)
     return words.some(word => SECRET_WORDS.has(word.toLowerCase()))
   }
+
+  function frameDocumentOf(host: Element): Document | null {
+    try {
+      const frameDocument: unknown = Reflect.get(host, 'contentDocument')
+      return isDocument(frameDocument) ? frameDocument : null
+    } catch {
+      return null
+    }
+  }
+
+  function rootsIn(start: ParentNode): ParentNode[] {
+    const roots: ParentNode[] = [start]
+    for (const host of Array.from(start.querySelectorAll('*'))) {
+      const inner = host.shadowRoot ?? frameDocumentOf(host)
+      if (inner) roots.push(...rootsIn(inner))
+    }
+    return roots
+  }
+
+  const roots = rootsIn(document)
+  const el = roots.map(root => root.querySelector(`[${ATTR}="${marker}"]`)).find(found => found !== null) ?? null
+  if (!el) return null
 
   function typeName(type: unknown): string {
     if (typeof type === 'string') return type
@@ -73,10 +149,34 @@ export function inspectElement(marker: string): Inspection | null {
   }
 
   const typedPasswords = new Set(
-    Array.from(document.querySelectorAll('input[type="password"]'), input => (input instanceof HTMLInputElement ? input.value : '')).filter(v => v !== ''),
+    roots.flatMap(root => Array.from(root.querySelectorAll('input')).filter(isPasswordInput).map(input => input.value)).filter(v => v !== ''),
   )
 
+  function tagOf(value: object): string {
+    try {
+      return Object.prototype.toString.call(value)
+    } catch {
+      return ''
+    }
+  }
+
+  function dateText(value: object): string {
+    try {
+      return Number.isNaN(Date.prototype.getTime.call(value)) ? '[Invalid Date]' : Date.prototype.toISOString.call(value)
+    } catch {
+      return '[Date]'
+    }
+  }
+
   function serialize(value: unknown, depth: number, hideKeylessStrings = false): unknown {
+    try {
+      return serializeValue(value, depth, hideKeylessStrings)
+    } catch {
+      return '[unreadable]'
+    }
+  }
+
+  function serializeValue(value: unknown, depth: number, hideKeylessStrings: boolean): unknown {
     switch (typeof value) {
       case 'undefined':
         return '[undefined]'
@@ -95,12 +195,13 @@ export function inspectElement(marker: string): Inspection | null {
         return `[function ${value.name || 'anonymous'}]`
     }
     if (value === null) return null
-    if (value instanceof Element) return `<${value.tagName.toLowerCase()}>`
-    if (value instanceof Date) return value.toISOString()
-    if (value instanceof Map) return `[Map(${value.size})]`
-    if (value instanceof Set) return `[Set(${value.size})]`
-    if (value instanceof Promise) return '[Promise]'
+    if (isElement(value)) return `<${value.tagName.toLowerCase()}>`
     if (!isRecord(value)) return String(value)
+    const tag = tagOf(value)
+    if (tag === '[object Date]') return dateText(value)
+    if (tag === '[object Map]') return `[Map(${String(Reflect.get(value, 'size'))})]`
+    if (tag === '[object Set]') return `[Set(${String(Reflect.get(value, 'size'))})]`
+    if (tag === '[object Promise]') return '[Promise]'
     if ('$$typeof' in value) return `<${typeName(value.type)} />`
     if (depth >= 2) return Array.isArray(value) ? `[Array(${value.length})]` : '[Object]'
     if (Array.isArray(value)) {
@@ -177,8 +278,8 @@ export function inspectElement(marker: string): Inspection | null {
     return JSON.stringify(value)
   }
 
-  function selectorFor(node: Element): string {
-    if (node.id && document.querySelectorAll(`#${CSS.escape(node.id)}`).length === 1) return `#${CSS.escape(node.id)}`
+  function selectorIn(node: Element, root: ParentNode): string {
+    if (node.id && root.querySelectorAll(`#${CSS.escape(node.id)}`).length === 1) return `#${CSS.escape(node.id)}`
     const parts: string[] = []
     let cur: Element | null = node
     while (cur && cur !== document.documentElement && parts.length < 8) {
@@ -187,16 +288,48 @@ export function inspectElement(marker: string): Inspection | null {
       if (hint) part += `[${hint}=${quote(cur.getAttribute(hint) ?? '')}]`
       const parent: Element | null = cur.parentElement
       const tag = cur.tagName
-      if (parent) {
-        const same = Array.from(parent.children).filter(c => c.tagName === tag)
-        if (same.length > 1) part += `:nth-of-type(${same.indexOf(cur) + 1})`
-      }
+      const same = Array.from((parent ?? root).children).filter(c => c.tagName === tag)
+      if (same.length > 1) part += `:nth-of-type(${same.indexOf(cur) + 1})`
       parts.unshift(part)
       const selector = parts.join(' > ')
-      if (document.querySelectorAll(selector).length === 1) return selector
+      if (root.querySelectorAll(selector).length === 1) return selector
       cur = parent
     }
     return parts.join(' > ')
+  }
+
+  function hostOf(root: Node): Element | null {
+    if (isShadowRoot(root)) return root.host
+    if (!isDocument(root)) return null
+    const frame: unknown = root.defaultView?.frameElement
+    return isElement(frame) ? frame : null
+  }
+
+  function selectorFor(node: Element): string {
+    const segments: string[] = []
+    for (let cur: Element | null = node; cur; ) {
+      const root = cur.getRootNode()
+      if (!isParentNode(root)) break
+      segments.unshift(selectorIn(cur, root))
+      cur = hostOf(root)
+    }
+    return segments.join(' >>> ')
+  }
+
+  function topBox(node: Element): { x: number; y: number; width: number; height: number } {
+    const { x, y, width, height } = node.getBoundingClientRect()
+    let left = x
+    let top = y
+    for (let doc = node.ownerDocument; doc !== document; ) {
+      const frame = doc.defaultView?.frameElement
+      if (!frame) break
+      const bounds = frame.getBoundingClientRect()
+      const style = frame.ownerDocument.defaultView?.getComputedStyle(frame)
+      left += bounds.x + frame.clientLeft + (parseFloat(style?.paddingLeft ?? '') || 0)
+      top += bounds.y + frame.clientTop + (parseFloat(style?.paddingTop ?? '') || 0)
+      doc = frame.ownerDocument
+    }
+    return { x: left, y: top, width, height }
   }
 
   function describe(node: Element): string {
@@ -236,27 +369,23 @@ export function inspectElement(marker: string): Inspection | null {
       if (attr.name.startsWith('data-annotate-dom-')) continue
       out[attr.name] = attr.value.length > 300 ? `${attr.value.slice(0, 300)}...` : attr.value
     }
-    if (node instanceof HTMLInputElement) {
+    if (isInput(node)) {
       const secret = node.type === 'password'
       if (secret && node.hasAttribute('value')) out.value = '[redacted]'
       out['(value)'] = secret ? '[redacted]' : node.value
       if (node.type === 'checkbox' || node.type === 'radio') out['(checked)'] = String(node.checked)
     }
-    if (node instanceof HTMLTextAreaElement || node instanceof HTMLSelectElement) out['(value)'] = node.value
-    if (
-      node instanceof HTMLButtonElement || node instanceof HTMLInputElement ||
-      node instanceof HTMLSelectElement || node instanceof HTMLTextAreaElement
-    ) out['(disabled)'] = String(node.disabled)
+    if (isTextArea(node) || isSelect(node)) out['(value)'] = node.value
+    if (isButton(node) || isInput(node) || isSelect(node) || isTextArea(node)) out['(disabled)'] = String(node.disabled)
     return out
   }
 
   function outerHtmlWithoutPasswords(node: Element): string {
-    const isPassword = (field: Element): field is HTMLInputElement => field instanceof HTMLInputElement && field.type === 'password'
-    const fields = [node, ...Array.from(node.querySelectorAll('input'))].filter(isPassword)
+    const fields = [node, ...Array.from(node.querySelectorAll('input'))].filter(isPasswordInput)
     if (fields.length === 0) return node.outerHTML
     const copy = node.cloneNode(true)
-    if (!(copy instanceof Element)) return node.outerHTML
-    for (const field of [copy, ...Array.from(copy.querySelectorAll('input'))].filter(isPassword)) field.removeAttribute('value')
+    if (!isElement(copy)) return node.outerHTML
+    for (const field of [copy, ...Array.from(copy.querySelectorAll('input'))].filter(isPasswordInput)) field.removeAttribute('value')
     return copy.outerHTML
   }
 
@@ -337,15 +466,30 @@ export function inspectElement(marker: string): Inspection | null {
     return isRecord(value) && typeof Reflect.get(value, Symbol.iterator) === 'function'
   }
 
-  function styleRules(): CSSStyleRule[] {
+  function isStyleRule(value: unknown): value is CSSStyleRule {
+    return isRecord(value) && typeof value.selectorText === 'string' && isRecord(value.style)
+  }
+
+  function isStyleSheet(value: unknown): value is CSSStyleSheet {
+    return isRecord(value) && 'cssRules' in value
+  }
+
+  function sheetsOf(root: ParentNode): CSSStyleSheet[] {
+    return ['styleSheets', 'adoptedStyleSheets'].flatMap(key => {
+      const list: unknown = Reflect.get(root, key)
+      return isIterable(list) ? Array.from(list).filter(isStyleSheet) : []
+    })
+  }
+
+  function styleRules(root: ParentNode): CSSStyleRule[] {
     const rules: CSSStyleRule[] = []
     const visit = (list: Iterable<unknown>) => {
       for (const rule of list) {
-        if (rule instanceof CSSStyleRule) rules.push(rule)
+        if (isStyleRule(rule)) rules.push(rule)
         if (isRecord(rule) && isIterable(rule.cssRules)) visit(rule.cssRules)
       }
     }
-    for (const sheet of Array.from(document.styleSheets)) {
+    for (const sheet of sheetsOf(root)) {
       try {
         visit(sheet.cssRules)
       } catch {
@@ -360,7 +504,7 @@ export function inspectElement(marker: string): Inspection | null {
   }
 
   function customProperties(): string[] {
-    return Array.from(new Set(styleRules().flatMap(rule => declaredNames(rule.style))))
+    return Array.from(new Set(styleRules(document).flatMap(rule => declaredNames(rule.style))))
   }
 
   function matchesNode(node: Element, selector: string): boolean {
@@ -375,10 +519,25 @@ export function inspectElement(marker: string): Inspection | null {
     return Array.from(cssText.matchAll(VAR_REFERENCE), match => match[1] ?? '')
   }
 
+  function isDeclaration(value: unknown): value is CSSStyleDeclaration {
+    return isRecord(value) && typeof value.cssText === 'string' && typeof value.getPropertyValue === 'function'
+  }
+
+  function inlineStyleOf(node: Element): CSSStyleDeclaration | null {
+    const style: unknown = Reflect.get(node, 'style')
+    return isDeclaration(style) ? style : null
+  }
+
+  function enclosingElement(node: Element): Element | null {
+    if (node.parentElement) return node.parentElement
+    const root = node.getRootNode()
+    return isShadowRoot(root) ? root.host : null
+  }
+
   function secretVariableValues(node: Element): string[] {
     const values = new Set<string>()
-    for (let n: Element | null = node; n; n = n.parentElement) {
-      const style = getComputedStyle(n)
+    for (let n: Element | null = node; n; n = enclosingElement(n)) {
+      const style = (n.ownerDocument.defaultView ?? window).getComputedStyle(n)
       for (const name of declaredNames(style)) {
         const value = style.getPropertyValue(name).trim()
         if (value !== '' && isSecretKey(name)) values.add(value)
@@ -392,12 +551,13 @@ export function inspectElement(marker: string): Inspection | null {
   }
 
   function cssVariables(node: Element): CssVariable[] {
-    const rules = styleRules()
+    const root = node.getRootNode()
+    const rules = isParentNode(root) ? styleRules(root) : []
     const scoped: Element[] = []
     for (let n: Element | null = node; n && n !== n.ownerDocument.documentElement; n = n.parentElement) scoped.push(n)
 
     const referenced = new Set([
-      ...referencedNames(node instanceof HTMLElement ? node.style.cssText : ''),
+      ...referencedNames(inlineStyleOf(node)?.cssText ?? ''),
       ...rules.filter(rule => matchesNode(node, rule.selectorText)).flatMap(rule => referencedNames(rule.style.cssText)),
     ])
     for (const name of referenced) {
@@ -405,11 +565,14 @@ export function inspectElement(marker: string): Inspection | null {
     }
 
     const declared = new Set([
-      ...scoped.flatMap(n => (n instanceof HTMLElement ? declaredNames(n.style) : [])),
+      ...scoped.flatMap(n => {
+        const style = inlineStyleOf(n)
+        return style ? declaredNames(style) : []
+      }),
       ...rules.filter(rule => scoped.some(n => matchesNode(n, rule.selectorText))).flatMap(rule => declaredNames(rule.style)),
     ])
 
-    const computed = getComputedStyle(node)
+    const computed = (node.ownerDocument.defaultView ?? window).getComputedStyle(node)
     const secrets = secretVariableValues(node)
     const ordered = [...Array.from(referenced).sort(), ...Array.from(declared).filter(name => !referenced.has(name)).sort()]
     return ordered
@@ -459,17 +622,17 @@ export function inspectElement(marker: string): Inspection | null {
     const aria = normalized(node.getAttribute('aria-label'))
     if (aria) return aria
     const ids = node.getAttribute('aria-labelledby')?.split(/\s+/) ?? []
-    const referenced = ids.map(id => normalized(document.getElementById(id)?.textContent ?? '')).join(' ').trim()
+    const referenced = ids.map(id => normalized(node.ownerDocument.getElementById(id)?.textContent ?? '')).join(' ').trim()
     if (referenced) return referenced
-    if (!(node instanceof HTMLInputElement || node instanceof HTMLSelectElement || node instanceof HTMLTextAreaElement)) return ''
+    if (!(isInput(node) || isSelect(node) || isTextArea(node))) return ''
     return normalized(Array.from(node.labels ?? []).map(l => l.textContent).join(' '))
   }
 
   function nameOf(node: Element): string {
     const label = labelOf(node)
     if (label) return label
-    if (node instanceof HTMLInputElement && ['button', 'submit', 'reset'].includes(node.type)) return normalized(node.value)
-    if (node instanceof HTMLImageElement) return normalized(node.alt)
+    if (isInput(node) && ['button', 'submit', 'reset'].includes(node.type)) return normalized(node.value)
+    if (isImage(node)) return normalized(node.alt)
     return normalized(node.textContent)
   }
 
@@ -505,11 +668,11 @@ export function inspectElement(marker: string): Inspection | null {
   function statesOf(node: Element): string[] {
     const states: string[] = []
     const aria = (name: string) => node.getAttribute(name)
-    const field = node instanceof HTMLInputElement || node instanceof HTMLSelectElement || node instanceof HTMLTextAreaElement ? node : null
-    const textField = node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement ? node : null
-    const disabled = field?.disabled === true || ((node instanceof HTMLButtonElement || node instanceof HTMLFieldSetElement || node instanceof HTMLOptionElement) && node.disabled)
+    const field = isInput(node) || isSelect(node) || isTextArea(node) ? node : null
+    const textField = isInput(node) || isTextArea(node) ? node : null
+    const disabled = field?.disabled === true || ((isButton(node) || isFieldSet(node) || isOption(node)) && node.disabled)
     if (disabled || aria('aria-disabled') === 'true') states.push('disabled')
-    if ((node instanceof HTMLInputElement && node.checked) || aria('aria-checked') === 'true') states.push('checked')
+    if ((isInput(node) && node.checked) || aria('aria-checked') === 'true') states.push('checked')
     if (aria('aria-pressed') === 'true') states.push('pressed')
     if (aria('aria-selected') === 'true') states.push('selected')
     if (aria('aria-expanded') === 'true') states.push('expanded')
@@ -529,7 +692,7 @@ export function inspectElement(marker: string): Inspection | null {
     ancestors.push({ selector: describe(p), styles: pick(p, LAYOUT_KEYS) })
   }
 
-  const rect = el.getBoundingClientRect()
+  const rect = topBox(el)
   const html = outerHtmlWithoutPasswords(el).replace(new RegExp(` data-annotate-dom-(?:target|focused|hovered)="[^"]*"`, 'g'), '')
   const fiber = fiberOf(el)
   const selectedText = selectedTextIn(el)
@@ -539,7 +702,7 @@ export function inspectElement(marker: string): Inspection | null {
     tag: el.tagName.toLowerCase(),
     html: html.length > HTML_LIMIT ? html.slice(0, HTML_LIMIT) : html,
     htmlTruncated: html.length > HTML_LIMIT,
-    text: el instanceof HTMLElement ? el.innerText.trim().slice(0, 300) : '',
+    text: isHtml(el) ? el.innerText.trim().slice(0, 300) : '',
     box: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) },
     boxModel: boxModelOf(el),
     styles: pick(el, STYLE_KEYS),
@@ -559,8 +722,33 @@ export function inspectElement(marker: string): Inspection | null {
 }
 
 export async function axeViolations(marker: string): Promise<AxeViolation[]> {
-  const el = document.querySelector(`[data-annotate-dom-target="${marker}"]`)
-  const axe: unknown = Reflect.get(window, 'axe')
+  function isDocumentNode(value: unknown): value is Document {
+    return typeof value === 'object' && value !== null && Reflect.get(value, 'nodeType') === 9
+  }
+  function frameDocumentOf(host: Element): Document | null {
+    try {
+      const inner: unknown = Reflect.get(host, 'contentDocument')
+      return isDocumentNode(inner) ? inner : null
+    } catch {
+      return null
+    }
+  }
+  function findMarked(root: ParentNode): Element | null {
+    const direct = root.querySelector(`[data-annotate-dom-target="${marker}"]`)
+    if (direct) return direct
+    for (const host of Array.from(root.querySelectorAll('*'))) {
+      const inner = host.shadowRoot ?? frameDocumentOf(host)
+      const found = inner && findMarked(inner)
+      if (found) return found
+    }
+    return null
+  }
+  function axeFor(doc: Document): unknown {
+    const view = doc.defaultView
+    return Reflect.get(view && view !== window ? view : window, 'axe')
+  }
+  const el = findMarked(document)
+  const axe = el && axeFor(el.ownerDocument)
   const run: unknown = typeof axe === 'object' && axe !== null ? Reflect.get(axe, 'run') : null
   if (!el || typeof run !== 'function') return []
   const results: unknown = await run.call(axe, el)

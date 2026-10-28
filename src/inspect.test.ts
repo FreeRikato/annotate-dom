@@ -1,8 +1,11 @@
 // @vitest-environment happy-dom
-/// <reference types="node" />
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { Window } from 'happy-dom'
 import { chromium, type Browser } from '@playwright/test'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { readFileSync } from 'node:fs'
+import { runInNewContext } from 'node:vm'
+import { createRequire } from 'node:module'
 import { inspectElement, axeViolations } from './inspect'
 import type { CssVariable } from './lib/types'
 
@@ -197,6 +200,41 @@ describe('inspectElement', () => {
       const owner = runInPage(marker)?.react?.owners[0]
       return { props: JSON.parse(owner?.props ?? 'null'), state: owner?.state }
     }
+
+    it('serializes Date, Map, Set and Promise values from another realm like the ones from this page', () => {
+      const other = runInNewContext('({ when: new Date(0), map: new Map([[1, 2]]), set: new Set([1, 2, 3]), later: Promise.resolve(1), plain: { n: 1 } })')
+      expect(other.when instanceof Date).toBe(false)
+      expect(reactProps('r1', other).props).toEqual({ when: '1970-01-01T00:00:00.000Z', map: '[Map(1)]', set: '[Set(3)]', later: '[Promise]', plain: { n: 1 } })
+    })
+
+    it('exports an invalid Date, a Date from another realm and an object posing as a Date without throwing', () => {
+      const posing = { [Symbol.toStringTag]: 'Date', toISOString: () => { throw new Error('page code ran') } }
+      const props = reactProps('r1', {
+        bad: new Date('x'),
+        badOther: runInNewContext('new Date("x")'),
+        posing,
+        fine: runInNewContext('new Date(0)'),
+      }).props
+      expect(props).toEqual({ bad: '[Invalid Date]', badOther: '[Invalid Date]', posing: '[Date]', fine: '1970-01-01T00:00:00.000Z' })
+    })
+
+    it('exports an object whose toStringTag getter throws without throwing', () => {
+      const hostile = { get [Symbol.toStringTag](): string { throw new Error('page code ran') }, n: 1 }
+      expect(reactProps('r1', { hostile }).props).toEqual({ hostile: { n: 1 } })
+    })
+
+    it('turns a revoked proxy, a proxied Map and a throwing getter into [unreadable] for that value only', () => {
+      const revoked = Proxy.revocable({}, {})
+      revoked.revoke()
+      const props = reactProps('r1', {
+        revoked: revoked.proxy,
+        map: new Proxy(new Map([[1, 2]]), {}),
+        set: new Proxy(new Set([1]), {}),
+        getter: { get boom(): string { throw new Error('page code ran') } },
+        fine: 1,
+      }).props
+      expect(props).toEqual({ revoked: '[unreadable]', map: '[unreadable]', set: '[unreadable]', getter: '[unreadable]', fine: 1 })
+    })
 
     it.each(['pwd', 'passcode', 'pin', 'otp', 'credential', 'token', 'secret', 'password', 'key', 'session', 'auth', 'cookie'])(
       'redacts the value under %s in any case',
@@ -790,6 +828,29 @@ describe('inspectElement', () => {
       expect(runInPage('v1')?.cssVariables).toEqual([{ name: '--ok', value: '1' }])
     })
 
+    it('reads the stylesheets of the shadow root the element is in, not the page', () => {
+      document.head.innerHTML = '<style>.page-only { --page: 1 }</style>'
+      document.body.innerHTML = '<div id="host"></div>'
+      const root = document.getElementById('host')?.attachShadow({ mode: 'open' })
+      if (!root) throw new Error('fixture missing')
+      root.innerHTML = '<style>.inner { --inner: 2 }</style><i class="page-only inner" data-annotate-dom-target="v1">x</i>'
+      Object.defineProperty(root, 'styleSheets', { value: [root.querySelector('style')?.sheet] })
+      expect(runInPage('v1')?.cssVariables).toEqual([{ name: '--inner', value: '2' }])
+    })
+
+    it('reads the stylesheets of the iframe document the element is in', () => {
+      document.head.innerHTML = '<style>.page-only { --page: 1 }</style>'
+      document.body.innerHTML = '<div id="pane"></div>'
+      const frame = document.getElementById('pane')
+      const inner = new Window().document
+      inner.head.innerHTML = '<style>.inner { --inner: 2 }</style>'
+      inner.body.innerHTML = '<i class="page-only inner" data-annotate-dom-target="v1">x</i>'
+      if (!frame) throw new Error('fixture missing')
+      Object.defineProperty(frame, 'contentDocument', { value: inner })
+      Object.defineProperty(inner.defaultView, 'frameElement', { value: frame })
+      expect(runInPage('v1')?.cssVariables).toEqual([{ name: '--inner', value: '2' }])
+    })
+
     describe('redaction by resolved value in Chromium', () => {
       const tokens = {
         imported: ':root { --api-key: sk-live-imported; --color: var(--api-key) }',
@@ -798,8 +859,11 @@ describe('inspectElement', () => {
       const pages: Record<string, string> = {
         '/html-style': '<!doctype html><html style="--api-key: sk-live-htmlstyle; --c: var(--api-key)"><head><style>.box { color: var(--c) }</style></head><body><i class="box" data-annotate-dom-target="v1">x</i></body></html>',
         '/import': '<!doctype html><html><head><style>@import url("/imported.css"); .box { color: var(--color) }</style></head><body><i class="box" data-annotate-dom-target="v1">x</i></body></html>',
+        '/shadow': '<!doctype html><html><head><style>:root { --session-id: sk-live-shadowed; --color: var(--session-id) }</style></head><body><div id="host"></div><script>document.getElementById("host").attachShadow({ mode: "open" }).innerHTML = "<style>.inner { color: var(--color) }</style><i class=inner data-annotate-dom-target=v1>x</i>"</script></body></html>',
+        '/shadow-override': '<!doctype html><html><head><style>#host { --api-key: sk-live-onhost; --color: var(--api-key) }</style></head><body><div id="host"></div><script>document.getElementById("host").attachShadow({ mode: "open" }).innerHTML = "<style>.inner { --api-key: overridden; color: var(--color) }</style><i class=inner data-annotate-dom-target=v1>x</i>"</script></body></html>',
         '/override': '<!doctype html><html><head><style>:root { --api-key: sk-live-rootvalue; --color: var(--api-key) } .box { --api-key: overridden; color: var(--color) }</style></head><body><i class="box" data-annotate-dom-target="v1">x</i></body></html>',
         '/compound': '<!doctype html><html><head><style>:root { --api-key: sk-live-compound } .box { --shadow: 0 0 2px var(--api-key); box-shadow: var(--shadow) }</style></head><body><i class="box" data-annotate-dom-target="v1">x</i></body></html>',
+        '/frame-shadow-override': '<!doctype html><html><body><iframe src="/shadow-override"></iframe></body></html>',
         '/short-equal': '<!doctype html><html><head><style>.box { --keyframe-delay: 0s; --radius: 0s; --api-key: sk-live-equal; --same: sk-live-equal; padding: var(--radius); color: var(--same) }</style></head><body><i class="box" data-annotate-dom-target="v1">x</i></body></html>',
         '/short': '<!doctype html><html><head><style>.box { --pin-size: 4px; --gap: 14px; padding: var(--gap) }</style></head><body><i class="box" data-annotate-dom-target="v1">x</i></body></html>',
       }
@@ -850,7 +914,10 @@ describe('inspectElement', () => {
         ['an alias declared on <html style>', '/html-style', '--c'],
         ['an alias in an @imported sheet', '/import', '--color'],
         ['an alias in a cross-origin sheet', '/cross-origin', '--brand'],
+        ['a page :root alias seen from a shadow root', '/shadow', '--color'],
+        ['an alias on a shadow host whose secret the shadow content overrides', '/shadow-override', '--color'],
         ['an alias whose secret a descendant overrides', '/override', '--color'],
+        ['an alias on a shadow host inside a same-origin iframe', '/frame-shadow-override', '--color'],
         ['a compound value that contains the secret', '/compound', '--shadow'],
       ])('redacts %s', async (_label, path, alias) => {
         const variables = await chromiumVariables(path)
@@ -1009,5 +1076,60 @@ describe('inspectElement', () => {
       expect(found.map(v => v.id)).toEqual(['image-alt'])
       expect(found[0].selector).toContain('img')
     })
+
+    function pageWithFrame(frameBody: string) {
+      document.documentElement.removeAttribute('lang')
+      document.head.innerHTML = ''
+      document.body.innerHTML = '<div id="pane"></div>'
+      const frame = document.getElementById('pane')
+      const frameWindow = new Window()
+      frameWindow.document.body.innerHTML = frameBody
+      if (!frame) throw new Error('fixture missing')
+      Object.defineProperty(frame, 'contentDocument', { value: frameWindow.document })
+      Object.defineProperty(frameWindow, 'frameElement', { value: frame })
+      return frameWindow
+    }
+
+    it('runs the frame\'s own axe for a pin inside an iframe, never the top page\'s', async () => {
+      const topRun = fakeAxe([{ id: 'document-title', impact: 'serious', nodes: [{ target: ['html'] }] }])
+      const frameWindow = pageWithFrame('<img data-annotate-dom-target="f1" src="b.png" />')
+      const frameRun = vi.fn(async (_context: Element) => ({ violations: [{ id: 'image-alt', impact: 'critical', nodes: [{ target: ['img'] }] }] }))
+      Reflect.set(frameWindow, 'axe', { run: frameRun })
+      expect(await runAxeInPage('f1')).toEqual([{ id: 'image-alt', impact: 'critical', selector: 'img' }])
+      expect(frameRun.mock.calls[0][0]).toBe(frameWindow.document.querySelector('img'))
+      expect(topRun).not.toHaveBeenCalled()
+    })
+
+    it('is empty for a pin in an iframe that has no axe', async () => {
+      fakeAxe([{ id: 'document-title', impact: 'serious', nodes: [{ target: ['html'] }] }])
+      pageWithFrame('<img data-annotate-dom-target="f2" src="b.png" />')
+      expect(await runAxeInPage('f2')).toEqual([])
+    })
+
+    it('audits only the pinned element of a real iframe in Chromium', async () => {
+      const axeSource = readFileSync(createRequire(import.meta.url).resolve('axe-core/axe.min.js'), 'utf8')
+      const browser = await chromium.launch()
+      try {
+        const page = await browser.newPage()
+        await page.setContent('<!doctype html><html><body><iframe id="pane" srcdoc="&lt;!doctype html&gt;&lt;html lang=en&gt;&lt;head&gt;&lt;title&gt;t&lt;/title&gt;&lt;/head&gt;&lt;body&gt;&lt;main&gt;&lt;h1&gt;h&lt;/h1&gt;&lt;button id=ok&gt;Ok&lt;/button&gt;&lt;img id=bad src=b.png&gt;&lt;/main&gt;&lt;/body&gt;&lt;/html&gt;"></iframe></body></html>')
+        await page.frameLocator('#pane').locator('#ok').waitFor()
+        await page.addScriptTag({ content: axeSource })
+        await page.frame({ url: 'about:srcdoc' })?.addScriptTag({ content: axeSource })
+        const audit = (id: string): Promise<string[]> => page.evaluate(
+          async ({ run, id }) => {
+            const el = document.querySelector('iframe')?.contentDocument?.getElementById(id)
+            el?.setAttribute('data-annotate-dom-target', 'pin')
+            const found = await new Function(`return ${run}`)()('pin')
+            el?.removeAttribute('data-annotate-dom-target')
+            return found.map((v: { id: string }) => v.id)
+          },
+          { run: axeViolations.toString(), id },
+        )
+        expect(await audit('ok')).toEqual([])
+        expect(await audit('bad')).toEqual(['image-alt'])
+      } finally {
+        await browser.close()
+      }
+    }, 60_000)
   })
 })

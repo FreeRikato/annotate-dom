@@ -48,7 +48,7 @@ test.beforeAll(async () => {
   const port = await freePort()
   fixtureUrl = `http://localhost:${port}`
   fixture = spawn('bun', [join(REPO, 'e2e/fixture-server.ts')], {
-    env: { ...process.env, FIXTURE_PORT: String(port) },
+    env: { ...process.env, FIXTURE_PORT: String(port), FIXTURE_FOREIGN_PORT: String(await freePort()) },
     stdio: ['ignore', 'ignore', 'inherit'],
   })
   await expect.poll(() => fetch(`${fixtureUrl}/settings`).then(() => true, () => false), { timeout: 15_000 }).toBe(true)
@@ -498,5 +498,112 @@ test.describe('motion inside frames and quick re-clicks', () => {
       await worker.evaluate(() => Reflect.get(globalThis, 'restoreCapture')())
       await tab.close()
     }
+  })
+})
+
+async function greenPixelsInLastCrop(tabUrl: string): Promise<number> {
+  return worker.evaluate(async url => {
+    const [tab] = await chrome.tabs.query({ url })
+    const stored: Record<string, unknown> = await chrome.storage.local.get(`batch:${tab?.id}`)
+    const batch = Object.values(stored)[0]
+    const pins: unknown = batch && typeof batch === 'object' ? Reflect.get(batch, 'pins') : null
+    const last: unknown = Array.isArray(pins) ? pins.at(-1) : null
+    const crop: unknown = last && typeof last === 'object' ? Reflect.get(last, 'crop') : null
+    if (typeof crop !== 'string') throw new Error('no crop stored')
+    const bitmap = await createImageBitmap(await (await fetch(crop)).blob())
+    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height)
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new Error('no 2d context')
+    ctx.drawImage(bitmap, 0, 0)
+    const { data } = ctx.getImageData(0, 0, bitmap.width, bitmap.height)
+    let green = 0
+    for (let i = 0; i < data.length; i += 4) if (data[i] < 80 && data[i + 1] > 150 && data[i + 2] < 80) green += 1
+    return green
+  }, tabUrl)
+}
+
+async function copiedMarkdown(tab: Page, tabOverlay: Locator): Promise<string> {
+  await tabOverlay.getByRole('button', { name: 'Copy all' }).click()
+  await expect(tabOverlay.locator('.toast')).toContainText('Copied ', { timeout: 20_000 })
+  return tab.evaluate(() => navigator.clipboard.readText())
+}
+
+test.describe('shadow roots and frames', () => {
+  test('hovering and clicking inside an open shadow root pins the inner element', async () => {
+    const tab = await context.newPage()
+    await tab.bringToFront()
+    const tabOverlay = tab.locator('annotate-dom-root')
+    await tab.goto(`${fixtureUrl}/shadow`)
+    await toggleOverlay()
+    await expect(tabOverlay.locator('.panel')).toBeVisible()
+
+    await tab.locator('#inner').hover()
+    await expect(tabOverlay.locator('.hl-label')).toContainText('button#inner')
+    await tab.locator('#inner').click()
+    await tabOverlay.locator('.editor textarea').fill('shadow button needs a border')
+    await tabOverlay.locator('.editor textarea').press('Enter')
+    await expect(tabOverlay.locator('.title')).toHaveText('annotate-dom (1)', { timeout: 20_000 })
+    await expect(tabOverlay.locator('.marker')).toHaveCount(1)
+    expect(await greenPixelsInLastCrop('*://*/shadow')).toBeGreaterThan(500)
+    expect(await copiedMarkdown(tab, tabOverlay)).toContain('#host >>> #inner')
+    await tab.close()
+  })
+
+  test('hovering and clicking inside a same-origin iframe, and a shadow root in it, pin the inner element', async () => {
+    const tab = await context.newPage()
+    await tab.bringToFront()
+    const tabOverlay = tab.locator('annotate-dom-root')
+    await tab.goto(`${fixtureUrl}/frames`)
+    await toggleOverlay()
+    await expect(tabOverlay.locator('.panel')).toBeVisible()
+    const same = tab.frameLocator('#same')
+
+    await same.locator('#plain').hover()
+    await expect(tabOverlay.locator('.hl-label')).toContainText('button#plain')
+    const outer = await tab.locator('#same').boundingBox()
+    const inner = await same.locator('#plain').boundingBox()
+    const highlight = await tabOverlay.locator('.hl').boundingBox()
+    if (!outer || !inner || !highlight) throw new Error('missing boxes')
+    expect(Math.abs(highlight.x - inner.x)).toBeLessThan(2)
+    expect(Math.abs(highlight.y - inner.y)).toBeLessThan(2)
+    expect(inner.x).toBeGreaterThan(outer.x)
+    await same.locator('#plain').click()
+    await tabOverlay.locator('.editor textarea').fill('frame button is cramped')
+    await tabOverlay.locator('.editor textarea').press('Enter')
+    await expect(tabOverlay.locator('.title')).toHaveText('annotate-dom (1)', { timeout: 20_000 })
+    await expect(tabOverlay.locator('.marker')).toHaveCount(1)
+    expect(await greenPixelsInLastCrop('*://*/frames')).toBeGreaterThan(500)
+
+    await same.locator('#nested').click()
+    await tabOverlay.locator('.editor textarea').fill('nested shadow button is cramped')
+    await tabOverlay.locator('.editor textarea').press('Enter')
+    await expect(tabOverlay.locator('.title')).toHaveText('annotate-dom (2)', { timeout: 20_000 })
+
+    await tab.reload()
+    await toggleOverlay()
+    await expect(tabOverlay.locator('.marker')).toHaveCount(2)
+    const markdown = await copiedMarkdown(tab, tabOverlay)
+    expect(markdown).toContain('#same >>> #plain')
+    expect(markdown).toContain('#same >>> #host >>> #nested')
+    await tab.close()
+  })
+
+  test('hovering a cross-origin iframe says it cannot be picked and a click opens no editor', async () => {
+    const tab = await context.newPage()
+    await tab.bringToFront()
+    const tabOverlay = tab.locator('annotate-dom-root')
+    await tab.goto(`${fixtureUrl}/frames`)
+    await toggleOverlay()
+    await expect(tabOverlay.locator('.panel')).toBeVisible()
+
+    const box = await tab.locator('#foreign').boundingBox()
+    if (!box) throw new Error('frame has no box')
+    await tab.mouse.move(box.x + 40, box.y + 40)
+    await expect(tabOverlay.locator('.hl-label')).toContainText('iframe#foreign')
+    await expect(tabOverlay.locator('.toast')).toContainText('cannot be picked')
+    await tab.mouse.click(box.x + 40, box.y + 40)
+    await tab.waitForTimeout(3000)
+    await expect(tabOverlay.locator('.editor')).toBeHidden()
+    await tab.close()
   })
 })
