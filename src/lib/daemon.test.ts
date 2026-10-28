@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import manifest from '../../public/manifest.json'
 import {
-  clearRecaptureTarget, createDaemonClient, createRecaptureHandler, FIRST_RETRY_MS, markRecaptureTarget, TARGET_ATTR, waitForQuiet, MAX_RETRY_MS, PING_MS, SEND_TIMEOUT_MS, sendLabel,
+  clearRecaptureTarget, createDaemonClient, createRecaptureHandler, FIRST_RETRY_MS, markRecaptureTarget, parseSavedLevel, TARGET_ATTR, waitForQuiet, MAX_RETRY_MS, PING_MS, SEND_TIMEOUT_MS, sendLabel,
   type RecaptureTabs, type SocketHandlers, type SocketLike,
 } from './daemon'
 import { inspectElement } from '../inspect'
@@ -11,6 +11,11 @@ import { isDetailLevel, type Inspection } from './types'
 describe('isDetailLevel', () => {
   it.each(['compact', 'standard', 'forensic'])('accepts %s', level => expect(isDetailLevel(level)).toBe(true))
   it.each(['loud', '', 3, null, undefined])('rejects %s', value => expect(isDetailLevel(value)).toBe(false))
+})
+
+describe('parseSavedLevel', () => {
+  it.each(['compact', 'standard', 'forensic'])('reads %s from the saved settings', level => expect(parseSavedLevel({ level })).toBe(level))
+  it.each([{ level: 'loud' }, {}, null, undefined, 'forensic', 3])('returns nothing for %j', settings => expect(parseSavedLevel(settings)).toBeUndefined())
 })
 
 class FakeSocket implements SocketLike {

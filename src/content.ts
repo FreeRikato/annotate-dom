@@ -1,12 +1,12 @@
 import { copyText } from './lib/clipboard'
-import { sendLabel, SETTINGS_KEY } from './lib/daemon'
+import { parseSavedLevel, sendLabel, SETTINGS_KEY } from './lib/daemon'
 import { FOCUSED_ATTR, HOVERED_ATTR, MARKER_ATTR, type Reply, type Request, type Responses } from './lib/messages'
 import { withSelectedCallSites } from './lib/callsites'
 import { pageKey } from './lib/page'
 import { pickTarget } from './lib/pick'
 import { createResolver } from './lib/resolve'
 import { callSiteFrame, nextBasePath } from './lib/stack'
-import { DETAIL_LEVELS, emptyBatch, isDetailLevel, PROJECT_ROOT_NOT_FOUND, type Batch, type Box, type Pin } from './lib/types'
+import { DETAIL_LEVELS, emptyBatch, PROJECT_ROOT_NOT_FOUND, type Batch, type Box, type Pin } from './lib/types'
 
 const GLOBAL_KEY = '__annotateDomToggle'
 const DAEMON_POLL_MS = 2000
@@ -341,6 +341,18 @@ function start(): () => void {
     }
   }
 
+  async function deliver(text: string, toasts: { copied: string; blocked: string }, withUndo: boolean) {
+    if ((await copyText(text)) === 'clipboard') {
+      fallback.style.display = 'none'
+      setToast(toasts.copied, withUndo)
+    } else {
+      fallbackText.value = text
+      fallback.style.display = 'block'
+      fallbackText.select()
+      setToast(toasts.blocked, withUndo)
+    }
+  }
+
   async function quickGrab(el: Element) {
     resetWalk()
     showHighlight(null)
@@ -349,15 +361,7 @@ function start(): () => void {
       const { inspection, elementSite, callSites } = await inspectPinned(el, id, readPinContext())
       const pin: Pin = { id, path: pageKey(location), url: location.href, note: '', createdAt: Date.now(), inspection, elementSite, callSites, crop: '' }
       const { markdown } = await call({ kind: 'quick-grab', pin, origin: location.origin })
-      if ((await copyText(markdown)) === 'clipboard') {
-        fallback.style.display = 'none'
-        setToast(`Copied ${inspection.selector}`, false)
-      } else {
-        fallbackText.value = markdown
-        fallback.style.display = 'block'
-        fallbackText.select()
-        setToast('Clipboard blocked; markdown is in the panel.', false)
-      }
+      await deliver(markdown, { copied: `Copied ${inspection.selector}`, blocked: 'Clipboard blocked; markdown is in the panel.' }, false)
     } catch (err: unknown) {
       setToast(`Could not copy: ${err instanceof Error ? err.message : String(err)}`, false)
     }
@@ -463,17 +467,8 @@ function start(): () => void {
     try {
       const { count, folder, prompt } = await call({ kind: 'send', origin: location.origin })
       batch = emptyBatch
-      const delivered = await copyText(prompt)
       const sent = `Sent ${count} annotation${count === 1 ? '' : 's'} to .annotations/${folder}/`
-      if (delivered === 'clipboard') {
-        fallback.style.display = 'none'
-        setToast(sent, false)
-      } else {
-        fallbackText.value = prompt
-        fallback.style.display = 'block'
-        fallbackText.select()
-        setToast(`${sent}; clipboard blocked, prompt is in the panel.`, false)
-      }
+      await deliver(prompt, { copied: sent, blocked: `${sent}; clipboard blocked, prompt is in the panel.` }, false)
     } catch (err: unknown) {
       busy = false
       if (err instanceof Error && err.message === PROJECT_ROOT_NOT_FOUND) return copyAll()
@@ -490,15 +485,7 @@ function start(): () => void {
     try {
       const { markdown, count } = await call({ kind: 'export', origin: location.origin })
       batch = emptyBatch
-      if ((await copyText(markdown)) === 'clipboard') {
-        fallback.style.display = 'none'
-        setToast(`Copied ${count} annotation${count === 1 ? '' : 's'} to the clipboard.`, true)
-      } else {
-        fallbackText.value = markdown
-        fallback.style.display = 'block'
-        fallbackText.select()
-        setToast('Clipboard blocked; markdown is in the panel.', true)
-      }
+      await deliver(markdown, { copied: `Copied ${count} annotation${count === 1 ? '' : 's'} to the clipboard.`, blocked: 'Clipboard blocked; markdown is in the panel.' }, true)
     } catch (err: unknown) {
       setToast(`Export failed: ${err instanceof Error ? err.message : String(err)}`, false)
     } finally {
@@ -559,8 +546,8 @@ function start(): () => void {
   window.setInterval(refreshDaemonStatus, DAEMON_POLL_MS)
 
   function showSavedLevel(settings: unknown) {
-    const level = typeof settings === 'object' && settings !== null && 'level' in settings ? settings.level : undefined
-    if (isDetailLevel(level)) levelSelect.value = level
+    const level = parseSavedLevel(settings)
+    if (level) levelSelect.value = level
   }
   chrome.storage.local.get(SETTINGS_KEY).then((stored: Record<string, unknown>) => showSavedLevel(stored[SETTINGS_KEY]), () => undefined)
   chrome.storage.onChanged.addListener((changes, area) => {
