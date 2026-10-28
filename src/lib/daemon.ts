@@ -103,6 +103,11 @@ export function markRecaptureTarget({ selector, locator, marker, attr }: {
     button: 'button', submit: 'button', reset: 'button', checkbox: 'checkbox', radio: 'radio',
     range: 'slider', search: 'searchbox', text: 'textbox', email: 'textbox', tel: 'textbox', url: 'textbox', number: 'spinbutton',
   }
+  const hasTag = (el: Element, tag: string) => el.localName === tag && el.namespaceURI === 'http://www.w3.org/1999/xhtml'
+  const isInput = (el: Element): el is HTMLInputElement => hasTag(el, 'input')
+  const isSelect = (el: Element): el is HTMLSelectElement => hasTag(el, 'select')
+  const isTextArea = (el: Element): el is HTMLTextAreaElement => hasTag(el, 'textarea')
+  const isImage = (el: Element): el is HTMLImageElement => hasTag(el, 'img')
   const roleOf = (el: Element): string | null => {
     const explicit = el.getAttribute('role')?.trim().split(/\s+/)[0]
     if (explicit) return explicit
@@ -115,16 +120,16 @@ export function markRecaptureTarget({ selector, locator, marker, attr }: {
     const aria = text(el.getAttribute('aria-label'))
     if (aria) return aria
     const ids = el.getAttribute('aria-labelledby')?.split(/\s+/) ?? []
-    const referenced = ids.map(id => text(document.getElementById(id)?.textContent ?? '')).join(' ').trim()
+    const referenced = ids.map(id => text(el.ownerDocument.getElementById(id)?.textContent ?? '')).join(' ').trim()
     if (referenced) return referenced
-    if (!(el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement)) return ''
+    if (!(isInput(el) || isSelect(el) || isTextArea(el))) return ''
     return text(Array.from(el.labels ?? []).map(l => l.textContent).join(' '))
   }
   const nameOf = (el: Element): string => {
     const label = labelOf(el)
     if (label) return label
-    if (el instanceof HTMLInputElement && ['button', 'submit', 'reset'].includes(el.type)) return text(el.value)
-    if (el instanceof HTMLImageElement) return text(el.alt)
+    if (isInput(el) && ['button', 'submit', 'reset'].includes(el.type)) return text(el.value)
+    if (isImage(el)) return text(el.alt)
     return text(el.textContent)
   }
   const quoted = "'((?:[^'\\\\]|\\\\.)*)'"
@@ -144,15 +149,76 @@ export function markRecaptureTarget({ selector, locator, marker, attr }: {
     const testId = new RegExp(`^getByTestId\\(${quoted}\\)$`).exec(source)
     return testId ? only(el => el.getAttribute('data-testid') === unquote(testId[1])) : null
   }
-  const el = (locator ? byLocator(locator) : null) ?? document.querySelector(selector)
+  function splitDeep(source: string): string[] {
+    const parts: string[] = []
+    let quote = ''
+    let from = 0
+    for (let i = 0; i < source.length; i++) {
+      const ch = source.charAt(i)
+      if (ch === '\\') i++
+      else if (quote) quote = ch === quote ? '' : quote
+      else if (ch === '"' || ch === "'") quote = ch
+      else if (source.startsWith(' >>> ', i)) {
+        parts.push(source.slice(from, i))
+        i += 4
+        from = i + 1
+      }
+    }
+    parts.push(source.slice(from))
+    return parts
+  }
+  const isDocumentNode = (value: unknown): value is Document =>
+    typeof value === 'object' && value !== null && Reflect.get(value, 'nodeType') === 9
+  function frameDocumentOf(host: Element): Document | null {
+    const inner: unknown = Reflect.get(host, 'contentDocument')
+    return isDocumentNode(inner) ? inner : null
+  }
+  function bySelector(source: string): Element | null {
+    const segments = splitDeep(source)
+    let root: ParentNode | null = document
+    try {
+      for (const segment of segments.slice(0, -1)) {
+        const host: Element | null = root.querySelector(segment)
+        root = host && (host.shadowRoot ?? frameDocumentOf(host))
+        if (!root) return null
+      }
+      return root.querySelector(segments[segments.length - 1] ?? '')
+    } catch {
+      return null
+    }
+  }
+  const el = (locator ? byLocator(locator) : null) ?? bySelector(selector)
   if (!el) return null
   el.setAttribute(attr, marker)
   const rect = el.getBoundingClientRect()
-  return { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) }
+  let x = rect.x
+  let y = rect.y
+  for (let frame = el.ownerDocument.defaultView?.frameElement; frame; frame = frame.ownerDocument.defaultView?.frameElement) {
+    const frameRect = frame.getBoundingClientRect()
+    const frameStyle = frame.ownerDocument.defaultView?.getComputedStyle(frame)
+    x += frameRect.left + frame.clientLeft + (parseFloat(frameStyle?.paddingLeft ?? '') || 0)
+    y += frameRect.top + frame.clientTop + (parseFloat(frameStyle?.paddingTop ?? '') || 0)
+  }
+  return { x: Math.round(x), y: Math.round(y), w: Math.round(rect.width), h: Math.round(rect.height) }
 }
 
 export function clearRecaptureTarget({ marker, attr }: { readonly marker: string; readonly attr: string }): void {
-  document.querySelector(`[${attr}="${marker}"]`)?.removeAttribute(attr)
+  function isParentNode(value: unknown): value is ParentNode {
+    return typeof value === 'object' && value !== null && typeof Reflect.get(value, 'querySelectorAll') === 'function'
+  }
+  function clearIn(root: ParentNode): boolean {
+    const direct = root.querySelector(`[${attr}="${marker}"]`)
+    if (direct) {
+      direct.removeAttribute(attr)
+      return true
+    }
+    return Array.from(root.querySelectorAll('*')).some(host => {
+      const frameContent: unknown = Reflect.get(host, 'contentDocument')
+      const inner = host.shadowRoot ?? (isParentNode(frameContent) ? frameContent : null)
+      return !!inner && clearIn(inner)
+    })
+  }
+  clearIn(document)
 }
 
 export function waitForQuiet({ quietMs, capMs }: { readonly quietMs: number; readonly capMs: number }): Promise<void> {

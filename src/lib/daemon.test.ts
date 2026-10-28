@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+import { Window } from 'happy-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import manifest from '../../public/manifest.json'
 import {
@@ -6,6 +7,7 @@ import {
   type RecaptureTabs, type SocketHandlers, type SocketLike,
 } from './daemon'
 import { inspectElement } from '../inspect'
+import { isDocument } from './deep'
 import { isDetailLevel, type Inspection } from './types'
 
 describe('isDetailLevel', () => {
@@ -289,6 +291,110 @@ describe('markRecaptureTarget', () => {
   })
 })
 
+describe('markRecaptureTarget through a deep selector', () => {
+  const inPage: typeof markRecaptureTarget = new Function(`return ${markRecaptureTarget.toString()}`)()
+  const mark = (selector: string, locator: string | null = null) => inPage({ selector, locator, marker: 'm', attr: TARGET_ATTR })
+
+  // happy-dom cannot load iframe pages, so a plain element stands in with the iframe's contentDocument and frameElement wiring
+  function frameWith(id: string, bodyMarkup: string, offset: { x: number; y: number }): Document {
+    document.body.insertAdjacentHTML('beforeend', `<div id="${id}"></div>`)
+    const frame = document.getElementById(id)
+    if (!frame) throw new Error('fixture missing')
+    const inner = new Window().document
+    inner.body.innerHTML = bodyMarkup
+    Object.defineProperty(frame, 'contentDocument', { value: inner })
+    Object.defineProperty(inner.defaultView, 'frameElement', { value: frame })
+    vi.spyOn(frame, 'getBoundingClientRect').mockReturnValue(new DOMRect(offset.x, offset.y, 300, 200))
+    if (!isDocument(inner)) throw new Error('fixture is not a document')
+    return inner
+  }
+
+  beforeEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  it('marks the inner element of an open shadow root', () => {
+    document.body.innerHTML = '<div id="card-host"></div>'
+    const root = document.getElementById('card-host')?.attachShadow({ mode: 'open' })
+    if (!root) throw new Error('fixture missing')
+    root.innerHTML = '<button id="inner">Save</button>'
+    const inner = root.querySelector('button')
+    if (!inner) throw new Error('fixture missing')
+    vi.spyOn(inner, 'getBoundingClientRect').mockReturnValue(new DOMRect(30, 40, 50, 20))
+
+    expect(mark('#card-host >>> #inner')).toEqual({ x: 30, y: 40, w: 50, h: 20 })
+    expect(inner.getAttribute(TARGET_ATTR)).toBe('m')
+  })
+
+  it('marks the inner element of an iframe and reports its box in top-page coordinates', () => {
+    const doc = frameWith('pane', '<button id="b">Go</button>', { x: 100, y: 200 })
+    const inner = doc.querySelector('#b')
+    if (!inner) throw new Error('fixture missing')
+    vi.spyOn(inner, 'getBoundingClientRect').mockReturnValue(new DOMRect(5, 6, 50, 20))
+
+    expect(mark('#pane >>> #b')).toEqual({ x: 105, y: 206, w: 50, h: 20 })
+    expect(inner.getAttribute(TARGET_ATTR)).toBe('m')
+  })
+
+  it('adds the frame border and padding to the box of an element in an iframe', () => {
+    const doc = frameWith('pane', '<p id="b">hi</p>', { x: 100, y: 200 })
+    const frame = document.getElementById('pane')
+    if (!frame) throw new Error('fixture missing')
+    frame.setAttribute('style', 'padding: 6px 4px')
+    Object.defineProperty(frame, 'clientLeft', { value: 2 })
+    Object.defineProperty(frame, 'clientTop', { value: 3 })
+    const inner = doc.querySelector('#b')
+    if (!inner) throw new Error('fixture missing')
+    vi.spyOn(inner, 'getBoundingClientRect').mockReturnValue(new DOMRect(5, 6, 50, 20))
+    expect(mark('#pane >>> #b')).toEqual({ x: 111, y: 215, w: 50, h: 20 })
+  })
+
+  it('resolves a plain selector that has the separator inside an attribute value', () => {
+    document.body.innerHTML = '<a data-x="a >>> b" id="t">x</a>'
+    expect(mark('a[data-x="a >>> b"]')).not.toBeNull()
+    expect(document.getElementById('t')?.getAttribute(TARGET_ATTR)).toBe('m')
+  })
+
+  it('splits only at separators outside quotes and brackets', () => {
+    document.body.innerHTML = '<div id="h" data-x="a >>> b"></div>'
+    const root = document.getElementById('h')?.attachShadow({ mode: 'open' })
+    if (!root) throw new Error('fixture missing')
+    root.innerHTML = '<b>q</b>'
+    expect(mark('div[data-x="a >>> b"] >>> b')).not.toBeNull()
+    expect(root.querySelector('b')?.getAttribute(TARGET_ATTR)).toBe('m')
+  })
+
+  it('ignores a contentDocument that is not a document', () => {
+    document.body.innerHTML = '<div id="fake"><p>x</p></div>'
+    const fake = document.getElementById('fake')
+    if (!fake) throw new Error('fixture missing')
+    Object.defineProperty(fake, 'contentDocument', { value: { nodeType: 1, querySelector: () => fake } })
+    expect(mark('#fake >>> p')).toBeNull()
+  })
+
+  it('finds nothing when a segment is missing, and ignores a locator that cannot see inside', () => {
+    frameWith('pane', '<button id="b">Go</button>', { x: 0, y: 0 })
+    expect(mark('#pane >>> #gone')).toBeNull()
+    expect(mark('#nope >>> #b')).toBeNull()
+    expect(mark('#pane >>> p[')).toBeNull()
+    expect(mark('#pane >>> #b', "getByRole('button', { name: 'Missing' })")).not.toBeNull()
+  })
+})
+
+describe('clearRecaptureTarget across documents', () => {
+  const inPage: typeof clearRecaptureTarget = new Function(`return ${clearRecaptureTarget.toString()}`)()
+
+  it('removes the marker from an element in a shadow root', () => {
+    document.body.innerHTML = '<div id="host"></div>'
+    const root = document.getElementById('host')?.attachShadow({ mode: 'open' })
+    if (!root) throw new Error('fixture missing')
+    root.innerHTML = '<button id="inner">Save</button>'
+    root.querySelector('button')?.setAttribute(TARGET_ATTR, 'recapture-1')
+    inPage({ marker: 'recapture-1', attr: TARGET_ATTR })
+    expect(root.innerHTML).toBe('<button id="inner">Save</button>')
+  })
+})
+
 describe('clearRecaptureTarget', () => {
   const inPage: typeof clearRecaptureTarget = new Function(`return ${clearRecaptureTarget.toString()}`)()
 
@@ -316,8 +422,18 @@ describe('markRecaptureTarget with the locators inspect writes', () => {
     'test id': '<div data-testid="card" data-annotate-dom-target="p"><i></i></div><div data-testid="other"><i></i></div>',
   }
 
+  const DOM_CONSTRUCTORS = ['Element', 'HTMLElement', 'HTMLInputElement', 'HTMLSelectElement', 'HTMLTextAreaElement', 'HTMLImageElement']
+
+  beforeEach(() => {
+    for (const constructorName of DOM_CONSTRUCTORS) vi.stubGlobal(constructorName, class {})
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
   for (const [name, html] of Object.entries(subjects)) {
-    it(`finds the ${name} by its locator without the selector`, () => {
+    it(`finds the ${name} by its locator without the selector, whichever constructors the page has`, () => {
       document.body.innerHTML = html
       const subject = document.querySelector('[data-annotate-dom-target="p"]')
       const locator = inspectInPage('p')?.locator

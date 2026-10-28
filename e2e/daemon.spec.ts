@@ -1,4 +1,4 @@
-import { type BrowserContext, type Page, type Worker, chromium, expect, test } from '@playwright/test'
+import { type BrowserContext, type FrameLocator, type Page, type Worker, chromium, expect, test } from '@playwright/test'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { type ChildProcess, spawn } from 'node:child_process'
@@ -189,6 +189,65 @@ test('recapture with no tab on the page opens one in the background, closes it a
   expect(existsSync(result.after)).toBe(true)
   expect(context.pages()).toHaveLength(tabsBefore)
   expect(await worker.evaluate(async () => (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]?.id)).toBe(activeBefore)
+})
+
+async function sendPins(path: string, pick: (page: Page) => Promise<string[]>): Promise<string> {
+  const before = new Set(readdirSync(join(project, '.annotations')))
+  await page.goto(`${fixtureUrl}${path}`)
+  await toggleOverlay()
+  const overlay = page.locator('annotate-dom-root')
+  await expect(overlay.locator('.panel')).toBeVisible()
+  const notes = await pick(page)
+  await expect(overlay.locator('.title')).toHaveText(`annotate-dom (${notes.length})`, { timeout: 20_000 })
+  await overlay.getByRole('button', { name: 'Send' }).click()
+  await expect(overlay.locator('.toast')).toContainText('Sent', { timeout: 20_000 })
+  const folder = readdirSync(join(project, '.annotations')).find(name => !before.has(name))
+  if (!folder) throw new Error('Send wrote no folder')
+  return folder
+}
+
+async function pinWithNote(target: Page | FrameLocator, selector: string, note: string): Promise<void> {
+  const overlay = page.locator('annotate-dom-root')
+  await target.locator(selector).click()
+  await overlay.locator('.editor textarea').fill(note)
+  await overlay.locator('.editor textarea').press('Enter')
+}
+
+test('recapture over MCP finds pins inside a same-origin iframe and a shadow root inside it', async () => {
+  const folder = await sendPins('/frames', async tab => {
+    await pinWithNote(tab.frameLocator('#same'), '#plain', 'frame button is cramped')
+    await expect(tab.locator('annotate-dom-root').locator('.title')).toHaveText('annotate-dom (1)', { timeout: 20_000 })
+    await pinWithNote(tab.frameLocator('#same'), '#nested', 'nested shadow button is cramped')
+    return ['frame', 'nested']
+  })
+  const batch = JSON.parse(readFileSync(join(project, '.annotations', folder, 'batch.json'), 'utf8'))
+  expect(batch.pins.map((pin: { inspection: { selector: string } }) => pin.inspection.selector)).toEqual(['#same >>> #plain', '#same >>> #host >>> #nested'])
+  await page.frameLocator('#same').locator('#plain').evaluate(el => { el.style.padding = '8px 16px' })
+  await page.frameLocator('#same').locator('#nested').evaluate(el => { el.style.padding = '8px 12px' })
+
+  const plain = await recapture({ id: `${folder}#1`, project })
+  const nested = await recapture({ id: `${folder}#2`, project })
+
+  expect(plain.styleDiff).toContainEqual({ prop: 'padding', before: '8px 24px', after: '8px 16px' })
+  expect(nested.styleDiff).toContainEqual({ prop: 'padding', before: '8px 24px', after: '8px 12px' })
+  for (const result of [plain, nested]) {
+    expect(readFileSync(result.before).subarray(1, 4).toString()).toBe('PNG')
+    expect(readFileSync(result.after).subarray(1, 4).toString()).toBe('PNG')
+  }
+})
+
+test('recapture over MCP finds a pin inside an open shadow root on a page that is not open', async () => {
+  const folder = await sendPins('/shadow', async tab => {
+    await pinWithNote(tab, '#inner', 'shadow button needs a border')
+    return ['shadow']
+  })
+  await page.goto('about:blank')
+
+  const result = await recapture({ id: `${folder}#1`, project })
+
+  expect(result.styleDiff).toEqual([])
+  expect(readFileSync(result.before).subarray(1, 4).toString()).toBe('PNG')
+  expect(readFileSync(result.after).subarray(1, 4).toString()).toBe('PNG')
 })
 
 test('a page with no local project falls back to Copy all while the daemon runs', async () => {
