@@ -134,6 +134,9 @@ function start(): () => void {
   let busy = false
   let connected = false
   let target: Element | null = null
+  let chain: Element[] = []
+  let chainIndex = 0
+  let walking = false
   let editing: Element | null = null
   let pinContext: { readonly focused: Element | null; readonly hovered: Element | null } = { focused: null, hovered: null }
   let pinSelection: Range | null = null
@@ -199,7 +202,7 @@ function start(): () => void {
     }
   }
 
-  function showHighlight(el: Element | null) {
+  function showHighlight(el: Element | null, position = '') {
     if (!el) {
       hl.style.display = 'none'
       return
@@ -208,7 +211,30 @@ function start(): () => void {
     Object.assign(hl.style, { display: 'block', left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` })
     const id = el.id ? `#${el.id}` : ''
     const cls = el.classList.length ? `.${Array.from(el.classList).slice(0, 2).join('.')}` : ''
-    hlLabel.textContent = `${el.tagName.toLowerCase()}${id}${cls}  ${Math.round(r.width)}x${Math.round(r.height)}`
+    hlLabel.textContent = `${el.tagName.toLowerCase()}${id}${cls}  ${Math.round(r.width)}x${Math.round(r.height)}${position}`
+  }
+
+  function pickPosition(): string {
+    return walking ? `  ${chainIndex + 1}/${chain.length}` : ''
+  }
+
+  function ancestorsBelowBody(el: Element): Element[] {
+    const chain: Element[] = []
+    for (let node: Element | null = el; node && node !== document.body && node !== document.documentElement; node = node.parentElement) chain.push(node)
+    return chain
+  }
+
+  function resetWalk() {
+    chainIndex = 0
+    walking = false
+    if (chain[0]) target = chain[0]
+  }
+
+  function pointTo(el: Element | null) {
+    if (el === chain[0]) return
+    chain = el ? ancestorsBelowBody(el) : []
+    resetWalk()
+    target = el
   }
 
   function appElement(candidate: Element | null | undefined): Element | null {
@@ -320,7 +346,26 @@ function start(): () => void {
 
   function onMove(event: MouseEvent) {
     if (!visible || !picking || editing) return
-    target = fromPage(event)
+    pointTo(fromPage(event))
+    showHighlight(target, pickPosition())
+  }
+
+  function onWheel(event: WheelEvent) {
+    if (!visible || !picking || editing || !event.altKey) return
+    if (!fromPage(event)) return
+    event.preventDefault()
+    event.stopImmediatePropagation()
+    pointTo(fromPage(event))
+    if (!chain.length || event.deltaY === 0) return
+    walking = true
+    chainIndex = Math.min(Math.max(chainIndex + (event.deltaY < 0 ? 1 : -1), 0), chain.length - 1)
+    target = chain[chainIndex] ?? null
+    showHighlight(target, pickPosition())
+  }
+
+  function onKeyUp(event: KeyboardEvent) {
+    if (event.key !== 'Alt' || !walking) return
+    resetWalk()
     showHighlight(target)
   }
 
@@ -332,10 +377,12 @@ function start(): () => void {
 
   function onClick(event: MouseEvent) {
     if (!visible || !picking) return
-    const el = fromPage(event)
-    if (!el) return
+    const hit = fromPage(event)
+    if (!hit) return
+    const el = walking && target ? target : hit
     event.preventDefault()
     event.stopImmediatePropagation()
+    resetWalk()
     openEditor(el)
   }
 
@@ -443,6 +490,8 @@ function start(): () => void {
   }
   window.addEventListener('click', onClick, opts)
   window.addEventListener('keydown', onKey, opts)
+  window.addEventListener('keyup', onKeyUp, opts)
+  window.addEventListener('wheel', onWheel, { capture: true, passive: false })
 
   function tick() {
     if (!host.isConnected) document.documentElement.append(host)
@@ -453,7 +502,7 @@ function start(): () => void {
       }
       renderMarkers()
       if (editing) showHighlight(editing)
-      else if (picking && target) showHighlight(target)
+      else if (picking && target) showHighlight(target, pickPosition())
     }
     requestAnimationFrame(tick)
   }
