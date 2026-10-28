@@ -28,6 +28,18 @@ async function freePort(): Promise<number> {
   })
 }
 
+type Rect = { x: number; y: number; width: number; height: number }
+
+function beside(card: Rect, element: Rect): boolean {
+  return card.x >= element.x + element.width || card.x + card.width <= element.x || card.y >= element.y + element.height || card.y + card.height <= element.y
+}
+
+function distanceToRect(point: { x: number; y: number }, rect: Rect): number {
+  const dx = Math.max(rect.x - point.x, 0, point.x - (rect.x + rect.width))
+  const dy = Math.max(rect.y - point.y, 0, point.y - (rect.y + rect.height))
+  return Math.hypot(dx, dy)
+}
+
 async function toggleOverlay(): Promise<void> {
   await worker.evaluate(async () => {
     const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true })
@@ -150,7 +162,7 @@ test('hovering and clicking pick the button under a transparent full-screen back
   await tab.mouse.click(x, y)
   await expect(tabOverlay.locator('.editor textarea')).toBeVisible()
   const editor = await tabOverlay.locator('.editor').boundingBox()
-  expect(editor?.y).toBeGreaterThanOrEqual(box.y + box.height)
+  expect(editor && beside(editor, box)).toBe(true)
   await tab.keyboard.press('Escape')
   await tab.close()
 })
@@ -199,7 +211,7 @@ test('Alt+scroll walks the pick target up its parents and back without scrolling
   await tab.keyboard.up('Alt')
   await expect(tabOverlay.locator('.editor textarea')).toBeVisible()
   const editor = await tabOverlay.locator('.editor').boundingBox()
-  expect(editor?.y).toBeGreaterThanOrEqual(outer.y + outer.height)
+  expect(editor && beside(editor, outer)).toBe(true)
   await tab.keyboard.press('Escape')
   await tab.close()
 })
@@ -719,4 +731,71 @@ test.describe('picking several elements', () => {
     await expect(tabOverlay.locator('.sel')).toHaveCount(0)
     await expect(tabOverlay.locator('.editor textarea')).toBeVisible({ timeout: 20_000 })
   })
+})
+
+test('the note card opens beside the element inside the viewport, a line joins them, and both follow scroll and resize', async () => {
+  const tab = await context.newPage()
+  await tab.bringToFront()
+  const tabOverlay = tab.locator('annotate-dom-root')
+  await tab.goto(`${fixtureUrl}/backdrop`)
+  await tab.evaluate(() => {
+    document.body.style.height = '2400px'
+    const go = document.getElementById('go')
+    if (go) Object.assign(go.style, { position: 'absolute', left: '200px', top: '300px' })
+  })
+  await toggleOverlay()
+  await expect(tabOverlay.locator('.panel')).toBeVisible()
+
+  const go = tab.locator('#go')
+  const goBox = async (): Promise<Rect> => {
+    const box = await go.boundingBox()
+    if (!box) throw new Error('button has no box')
+    return box
+  }
+  const cardBox = async (): Promise<Rect> => {
+    const box = await tabOverlay.locator('.editor').boundingBox()
+    if (!box) throw new Error('card has no box')
+    return box
+  }
+  const lineEnds = () =>
+    tabOverlay.locator('.link line').evaluate(line => ({
+      from: { x: Number(line.getAttribute('x1')), y: Number(line.getAttribute('y1')) },
+      to: { x: Number(line.getAttribute('x2')), y: Number(line.getAttribute('y2')) },
+    }))
+  const expectJoined = async () => {
+    const [card, element, ends] = [await cardBox(), await goBox(), await lineEnds()]
+    expect(distanceToRect(ends.from, card)).toBeLessThan(1.5)
+    expect(distanceToRect(ends.to, element)).toBeLessThan(1.5)
+  }
+  const expectInside = async () => {
+    const card = await cardBox()
+    const size = tab.viewportSize()
+    if (!size) throw new Error('page has no viewport')
+    expect(card.x).toBeGreaterThanOrEqual(8)
+    expect(card.y).toBeGreaterThanOrEqual(8)
+    expect(card.x + card.width).toBeLessThanOrEqual(size.width - 8)
+    expect(card.y + card.height).toBeLessThanOrEqual(size.height - 8)
+  }
+
+  const box = await goBox()
+  await tab.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+  await tab.mouse.click(box.x + box.width / 2, box.y + box.height / 2)
+  await expect(tabOverlay.locator('.editor textarea')).toBeVisible({ timeout: 20_000 })
+
+  const opened = await cardBox()
+  expect(opened.x).toBeGreaterThanOrEqual(box.x + box.width)
+  expect(beside(opened, box)).toBe(true)
+  await expectInside()
+  await expectJoined()
+
+  await tab.evaluate(() => scrollBy(0, 100))
+  await expect.poll(async () => (await cardBox()).y).toBe(opened.y - 100)
+  await expectJoined()
+
+  await tab.setViewportSize({ width: 520, height: 400 })
+  await expect.poll(async () => (await cardBox()).x + (await cardBox()).width).toBeLessThanOrEqual(512)
+  await expectInside()
+  await expectJoined()
+  await tab.keyboard.press('Escape')
+  await tab.close()
 })
