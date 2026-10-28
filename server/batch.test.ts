@@ -49,7 +49,7 @@ test('writes the folder named by time and first page slug with every file', asyn
   expect(folder).toBe('2026-10-27-1405-settings')
   expect(prompt).toBe('Fix the annotations in .annotations/2026-10-27-1405-settings/')
   const files = (await readdir(join(root, '.annotations', folder))).sort()
-  expect(files).toEqual(['batch.json', 'batch.md', 'pin-1.png', 'pin-2.png', 'viewport-settings.png'])
+  expect(files).toEqual(['batch.json', 'batch.md', 'pin-1.png', 'pin-2.png', 'viewport-1-settings.png'])
   expect(await readFile(join(root, '.annotations', folder, 'pin-1.png'), 'utf8')).toBe('png-bytes')
 })
 
@@ -71,7 +71,7 @@ test('batch.json holds open pins, relative file names and absolute source paths'
   const stored: StoredBatch = JSON.parse(await readFile(join(root, '.annotations', folder, 'batch.json'), 'utf8'))
   expect(stored).toMatchObject({
     version: 1, folder, project: root, origin: 'http://localhost:3000',
-    pages: [{ path: '/settings', url: 'http://localhost:3000/settings', viewportFile: 'viewport-settings.png' }],
+    pages: [{ path: '/settings', url: 'http://localhost:3000/settings', viewportFile: 'viewport-1-settings.png' }],
   })
   expect(stored.pins.map(p => p.n)).toEqual([1, 2])
   for (const pin of stored.pins) {
@@ -97,7 +97,7 @@ test('batch.md is toMarkdown of the stored batch with relative file names', asyn
   })
   expect(await readFile(join(dirPath, 'batch.md'), 'utf8')).toBe(expected)
   expect(expected).toContain('- Screenshot: pin-1.png')
-  expect(expected).toContain('- Viewport screenshot (pins numbered): viewport-settings.png')
+  expect(expected).toContain('- Viewport screenshot (pins numbered): viewport-1-settings.png')
 })
 
 test('.annotations/ is added to the git exclude once and git status stays clean', async () => {
@@ -180,4 +180,30 @@ test('each pin gets excerpts read from disk for its element site and project cal
   const markdown = await readFile(join(dirPath, 'batch.md'), 'utf8')
   expect(markdown).toContain(`- Code around ${page}:9 (lines 4 to 14):\n\n\`\`\`\`\npage 4\n`)
   expect(markdown).not.toContain('node_modules/ui')
+})
+
+test('a page path longer than a file name allows still writes the batch', async () => {
+  const path = `/app#/${'segment/'.repeat(60)}end`
+  const batch = wireBatch({
+    pages: [{ path, url: `http://localhost:3000${path}`, viewport: png }],
+    pins: wireBatch().pins.map(pin => ({ ...pin, path })),
+  })
+  const { folder } = await writeBatch({ root, home, batch })
+  const files = await readdir(join(root, '.annotations', folder))
+  expect(files.every(file => file.length <= 100)).toBe(true)
+  expect(files.filter(file => file.startsWith('viewport-'))).toHaveLength(1)
+})
+
+test('two pages whose paths slug alike keep separate viewport files', async () => {
+  const paths = ['/app#/users/5', '/app#/users-5']
+  const batch = wireBatch({
+    pages: paths.map(path => ({ path, url: `http://localhost:3000${path}`, viewport: png })),
+    pins: paths.map((path, i) => ({ ...wireBatch().pins[0], n: i + 1, id: `p${i}`, path })),
+  })
+  const { folder } = await writeBatch({ root, home, batch })
+  const stored: StoredBatch = JSON.parse(await readFile(join(root, '.annotations', folder, 'batch.json'), 'utf8'))
+  const [first, second] = stored.pages.map(page => page.viewportFile)
+  expect(first).not.toBe(second)
+  const files = await readdir(join(root, '.annotations', folder))
+  expect(files.filter(file => file.startsWith('viewport-'))).toHaveLength(2)
 })

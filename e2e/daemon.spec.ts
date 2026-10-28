@@ -128,7 +128,7 @@ test('Send writes the batch folder into the project, copies the prompt and downl
   const [folder] = readdirSync(join(project, '.annotations'))
   expect(folder).toMatch(/^\d{4}-\d{2}-\d{2}-\d{4}-settings$/)
   const files = readdirSync(join(project, '.annotations', folder))
-  expect(files).toEqual(expect.arrayContaining(['batch.json', 'batch.md', 'pin-1.png', 'viewport-settings.png']))
+  expect(files).toEqual(expect.arrayContaining(['batch.json', 'batch.md', 'pin-1.png', 'viewport-1-settings.png']))
   const batch = JSON.parse(readFileSync(join(project, '.annotations', folder, 'batch.json'), 'utf8'))
   expect(batch.pins[0].note).toBe('toggle needs less padding')
   expect(batch.pins[0].status).toBe('open')

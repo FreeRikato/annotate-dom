@@ -2,6 +2,7 @@ import { copyText } from './lib/clipboard'
 import { sendLabel } from './lib/daemon'
 import { FOCUSED_ATTR, HOVERED_ATTR, MARKER_ATTR, type Reply, type Request, type Responses } from './lib/messages'
 import { withSelectedCallSites } from './lib/callsites'
+import { pageKey } from './lib/page'
 import { createResolver } from './lib/resolve'
 import { callSiteFrame, nextBasePath } from './lib/stack'
 import { emptyBatch, PROJECT_ROOT_NOT_FOUND, type Batch, type Box, type Pin } from './lib/types'
@@ -128,7 +129,7 @@ function start(): () => void {
   let target: Element | null = null
   let editing: Element | null = null
   let pinContext: { readonly focused: Element | null; readonly hovered: Element | null } = { focused: null, hovered: null }
-  let lastPath = location.pathname
+  let lastPath = pageKey(location)
   let toastTimer = 0
 
   function setToast(text: string, withUndo: boolean) {
@@ -151,7 +152,7 @@ function start(): () => void {
     }
     let n = 0
     for (const path of new Set(batch.pins.map(p => p.path))) {
-      list.append(h('div', { className: 'group', text: path === location.pathname ? `${path} (this page)` : path }))
+      list.append(h('div', { className: 'group', text: path === pageKey(location) ? `${path} (this page)` : path }))
       for (const pin of batch.pins.filter(p => p.path === path)) {
         n += 1
         const item = h('div', { className: 'item' })
@@ -179,7 +180,7 @@ function start(): () => void {
   function renderMarkers() {
     markers.replaceChildren()
     for (const pin of batch.pins) {
-      if (pin.path !== location.pathname) continue
+      if (pin.path !== pageKey(location)) continue
       const el = locate(pin)
       if (!el) continue
       const r = el.getBoundingClientRect()
@@ -259,7 +260,7 @@ function start(): () => void {
       const rect = boxOf(el)
       const rects: Record<string, Box> = { [id]: rect }
       for (const pin of batch.pins) {
-        if (pin.path !== location.pathname) continue
+        if (pin.path !== pageKey(location)) continue
         const other = locate(pin)
         if (other) rects[pin.id] = boxOf(other)
       }
@@ -271,7 +272,7 @@ function start(): () => void {
       }
       const pin: Pin = {
         id,
-        path: location.pathname,
+        path: pageKey(location),
         url: location.href,
         note,
         createdAt: Date.now(),
@@ -423,8 +424,8 @@ function start(): () => void {
   function tick() {
     if (!host.isConnected) document.documentElement.append(host)
     if (visible) {
-      if (location.pathname !== lastPath) {
-        lastPath = location.pathname
+      if (pageKey(location) !== lastPath) {
+        lastPath = pageKey(location)
         renderList()
       }
       renderMarkers()

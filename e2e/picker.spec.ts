@@ -1,0 +1,99 @@
+import { type BrowserContext, type Locator, type Page, type Worker, chromium, expect, test } from '@playwright/test'
+import { type ChildProcess, spawn } from 'node:child_process'
+import { existsSync, mkdtempSync } from 'node:fs'
+import { createServer } from 'node:net'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+
+const EXTENSION = resolve(import.meta.dirname, '../dist-test')
+const REPO = resolve(import.meta.dirname, '..')
+
+test.describe.configure({ mode: 'serial' })
+
+let fixture: ChildProcess
+let fixtureUrl: string
+let context: BrowserContext
+let worker: Worker
+let page: Page
+let overlay: Locator
+
+async function freePort(): Promise<number> {
+  return new Promise(resolvePort => {
+    const probe = createServer()
+    probe.listen(0, 'localhost', () => {
+      const address = probe.address()
+      if (address === null || typeof address === 'string') throw new Error('probe has no port')
+      probe.close(() => resolvePort(address.port))
+    })
+  })
+}
+
+async function toggleOverlay(): Promise<void> {
+  await worker.evaluate(async () => {
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true })
+    const toggle: unknown = Reflect.get(globalThis, 'annotateDomToggle')
+    if (typeof toggle === 'function') await toggle(tab)
+  })
+}
+
+async function pin(element: Locator, note: string, count: number): Promise<void> {
+  await element.click()
+  await overlay.locator('.editor textarea').fill(note)
+  await overlay.locator('.editor textarea').press('Enter')
+  await expect(overlay.locator('.title')).toHaveText(`annotate-dom (${count})`, { timeout: 20_000 })
+}
+
+test.beforeAll(async () => {
+  test.skip(!existsSync(join(EXTENSION, 'manifest.json')), 'dist-test is missing: run bun run build:test')
+  const port = await freePort()
+  fixtureUrl = `http://localhost:${port}`
+  fixture = spawn('bun', [join(REPO, 'e2e/fixture-server.ts')], {
+    env: { ...process.env, FIXTURE_PORT: String(port) },
+    stdio: ['ignore', 'ignore', 'inherit'],
+  })
+  await expect.poll(() => fetch(`${fixtureUrl}/settings`).then(() => true, () => false), { timeout: 15_000 }).toBe(true)
+  context = await chromium.launchPersistentContext(mkdtempSync(join(tmpdir(), 'annotate-dom-profile-')), {
+    channel: 'chromium',
+    headless: true,
+    viewport: { width: 1280, height: 800 },
+    args: [`--disable-extensions-except=${EXTENSION}`, `--load-extension=${EXTENSION}`],
+  })
+  worker = context.serviceWorkers()[0] ?? (await context.waitForEvent('serviceworker'))
+  page = await context.newPage()
+  overlay = page.locator('annotate-dom-root')
+})
+
+test.afterAll(async () => {
+  await context?.close()
+  fixture?.kill()
+})
+
+test('a pin made on #/a shows under #/a only, and an anchor jump keeps the current page', async () => {
+  await page.goto(`${fixtureUrl}/router#/a`)
+  await toggleOverlay()
+  await expect(overlay.locator('.panel')).toBeVisible()
+
+  await pin(page.locator('#action'), 'save should confirm', 1)
+  await expect(overlay.locator('.marker')).toHaveCount(1)
+  await expect(overlay.locator('.list .group')).toHaveText('/router#/a (this page)')
+
+  await page.evaluate(() => (location.hash = '#/b'))
+  await expect(page.locator('#action')).toHaveText('Save page B')
+  await expect(overlay.locator('.marker')).toHaveCount(0)
+  await expect(overlay.locator('.list .group')).toHaveText('/router#/a')
+
+  await page.evaluate(() => (location.hash = '#/a'))
+  await expect(overlay.locator('.marker')).toHaveCount(1)
+  await expect(overlay.locator('.list .group')).toHaveText('/router#/a (this page)')
+
+  await page.goto(`${fixtureUrl}/router`)
+  await toggleOverlay()
+  await expect(overlay.locator('.panel')).toBeVisible()
+  await expect(overlay.locator('.title')).toHaveText('annotate-dom (1)')
+  await expect(overlay.locator('.marker')).toHaveCount(0)
+  await pin(page.locator('#top'), 'heading is too plain', 2)
+  await expect(overlay.locator('.marker')).toHaveCount(1)
+  await page.evaluate(() => (location.hash = '#top'))
+  await expect(overlay.locator('.marker')).toHaveCount(1)
+  await expect(overlay.locator('.list .group').filter({ hasText: '(this page)' })).toHaveText('/router (this page)')
+})
