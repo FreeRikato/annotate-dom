@@ -135,6 +135,7 @@ function start(): () => void {
   let target: Element | null = null
   let editing: Element | null = null
   let pinContext: { readonly focused: Element | null; readonly hovered: Element | null } = { focused: null, hovered: null }
+  let pinSelection: Range | null = null
   let lastPath = pageKey(location)
   let toastTimer = 0
 
@@ -219,6 +220,8 @@ function start(): () => void {
       focused: appElement(document.activeElement),
       hovered: appElement(Array.from(document.querySelectorAll(':hover')).filter(node => node !== host).at(-1)),
     }
+    const selection = getSelection()
+    pinSelection = selection && selection.rangeCount > 0 ? selection.getRangeAt(0).cloneRange() : null
     showHighlight(el)
     const r = el.getBoundingClientRect()
     const left = Math.min(Math.max(8, r.left), innerWidth - 316)
@@ -227,6 +230,13 @@ function start(): () => void {
     Object.assign(editor.style, { display: 'block', left: `${left}px`, top: `${top}px` })
     textarea.value = ''
     textarea.focus()
+  }
+
+  function restoreSelection(range: Range | null) {
+    const selection = getSelection()
+    if (!range || !selection) return
+    selection.removeAllRanges()
+    selection.addRange(range)
   }
 
   function closeEditor() {
@@ -240,6 +250,7 @@ function start(): () => void {
     renderList()
     const id = crypto.randomUUID()
     try {
+      restoreSelection(pinSelection)
       el.setAttribute(MARKER_ATTR, id)
       const { focused, hovered } = pinContext
       focused?.setAttribute(FOCUSED_ATTR, '')

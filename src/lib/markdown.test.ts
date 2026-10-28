@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { type ExportPage, toMarkdown } from './markdown'
-import type { Inspection, Pin } from './types'
+import type { DetailLevel, Inspection, Pin } from './types'
 
 function firstPage({ pages }: { readonly pages: readonly ExportPage[] }): ExportPage {
   const [page] = pages
@@ -326,6 +326,28 @@ describe('toMarkdown detail levels', () => {
     for (const absent of ['- Styles:', '- Attributes:', '- Parents', '- HTML', '- Screenshot', 'second line', '````']) {
       expect(md).not.toContain(absent)
     }
+  })
+
+  describe('selected text', () => {
+    const withSelection = (level?: DetailLevel) => {
+      const base = batch(1)
+      const [{ pin: first }] = firstPage(base).pins
+      const selected = { ...first, inspection: { ...first.inspection, selectedText: 'Save changes' } }
+      return toMarkdown({ ...base, level, pages: [{ ...firstPage(base), pins: [{ pin: selected, cropFile: null }] }] })
+    }
+
+    it('prints the selected text in standard', () => {
+      expect(withSelection()).toContain('- Selected text: "Save changes"\n')
+    })
+
+    it('prints the selected text right after the pin line in compact', () => {
+      expect(withSelection('compact')).toContain('(/app/components/ui/button.tsx:58): note 0\nSelected text: "Save changes"\n')
+    })
+
+    it('prints nothing when the pin has no selected text', () => {
+      expect(toMarkdown(batch(1))).not.toContain('Selected text')
+      expect(toMarkdown({ ...batch(1), level: 'compact' })).not.toContain('Selected text')
+    })
   })
 
   it('prints "no source" in compact when the element has no source', () => {

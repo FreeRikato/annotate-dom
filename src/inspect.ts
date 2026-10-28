@@ -28,6 +28,7 @@ export function inspectElement(marker: string): Inspection | null {
   const MAX_SHAPE_KEYS = 10
   const ERROR_LIMIT = 300
   const MAX_DIALOGS = 5
+  const SELECTION_LIMIT = 500
   const TOKEN_KEYS = ['color', 'background-color', 'padding', 'margin', 'gap', 'border-radius']
   const EMPTY_VALUES = new Set(['', '0px', 'none', 'normal', 'auto', 'transparent', 'rgba(0, 0, 0, 0)'])
   const TAG_ROLES: Record<string, string> = {
@@ -210,6 +211,12 @@ export function inspectElement(marker: string): Inspection | null {
       padding: sides(side => `padding-${side}`),
       border: sides(side => `border-${side}-width`),
     }
+  }
+
+  function selectedTextIn(node: Element): string | undefined {
+    const selection = window.getSelection()
+    if (!selection || selection.rangeCount === 0 || !selection.getRangeAt(0).intersectsNode(node)) return undefined
+    return selection.toString().trim().slice(0, SELECTION_LIMIT) || undefined
   }
 
   function attributes(node: Element): Record<string, string> {
@@ -445,6 +452,7 @@ export function inspectElement(marker: string): Inspection | null {
   const rect = el.getBoundingClientRect()
   const html = el.outerHTML.replace(new RegExp(` data-annotate-dom-(?:target|focused|hovered)="[^"]*"`, 'g'), '')
   const fiber = fiberOf(el)
+  const selectedText = selectedTextIn(el)
 
   return {
     selector: selectorFor(el),
@@ -465,6 +473,7 @@ export function inspectElement(marker: string): Inspection | null {
     tokens: designTokens(el),
     locator: locatorFor(el),
     a11y: accessibility(el),
+    ...(selectedText !== undefined && { selectedText }),
   }
 }
 

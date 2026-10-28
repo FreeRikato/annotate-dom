@@ -153,3 +153,27 @@ test('the level menu follows a level saved from another tab', async () => {
   await first.close()
   await second.close()
 })
+
+test('text highlighted before a normal pin reaches Copy all', async () => {
+  const tab = await context.newPage()
+  await tab.bringToFront()
+  const tabOverlay = tab.locator('annotate-dom-root')
+  await tab.goto(`${fixtureUrl}/settings`)
+  await toggleOverlay()
+  await expect(tabOverlay.locator('.panel')).toBeVisible()
+
+  await tab.evaluate(() => {
+    const heading = document.querySelector('h1')
+    const selection = getSelection()
+    if (!heading || !selection) throw new Error('fixture has no heading or selection')
+    selection.selectAllChildren(heading)
+  })
+  await tab.locator('h1').click()
+  await tabOverlay.locator('.editor textarea').fill('heading is too plain')
+  await tabOverlay.locator('.editor textarea').press('Enter')
+  await expect(tabOverlay.locator('.title')).toHaveText('annotate-dom (1)', { timeout: 20_000 })
+  await tabOverlay.getByRole('button', { name: 'Copy all' }).click()
+  await expect(tabOverlay.locator('.toast')).toContainText('Copied 1 annotation', { timeout: 20_000 })
+  expect(await tab.evaluate(() => navigator.clipboard.readText())).toContain('Selected text: "Settings"')
+  await tab.close()
+})

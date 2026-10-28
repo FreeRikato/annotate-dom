@@ -35,6 +35,104 @@ describe('inspectElement', () => {
     expect(runInPage('bm1')?.boxModel).toEqual({ margin: [0, 8, 0, 8], padding: [4, 12, 4, 12], border: [1, 1, 1, 3] })
   })
 
+  describe('selected text', () => {
+    function select(from: Node, fromOffset: number, to: Node, toOffset: number) {
+      const range = document.createRange()
+      range.setStart(from, fromOffset)
+      range.setEnd(to, toOffset)
+      const selection = window.getSelection()
+      selection?.removeAllRanges()
+      selection?.addRange(range)
+    }
+
+    function textOf(selector: string): Text {
+      const node = document.querySelector(selector)?.firstChild
+      if (!(node instanceof Text)) throw new Error('fixture missing')
+      return node
+    }
+
+    it('keeps the trimmed text selected inside the element', () => {
+      document.body.innerHTML = '<p id="a" data-annotate-dom-target="s1">say hello there</p>'
+      const text = textOf('#a')
+      select(text, 3, text, 12)
+      expect(runInPage('s1')?.selectedText).toBe('hello th')
+    })
+
+    it('trims whitespace around the selection', () => {
+      document.body.innerHTML = '<p id="a" data-annotate-dom-target="s1">say   hello   there</p>'
+      const text = textOf('#a')
+      select(text, 3, text, 12)
+      expect(runInPage('s1')?.selectedText).toBe('hello')
+    })
+
+    it('keeps the selected text when the selection runs into the element from outside', () => {
+      document.body.innerHTML = '<p id="a">before text</p><p id="b" data-annotate-dom-target="s1">inside text</p>'
+      select(textOf('#a'), 7, textOf('#b'), 6)
+      expect(runInPage('s1')?.selectedText).toContain('text')
+      expect(runInPage('s1')?.selectedText).toContain('inside')
+    })
+
+    it('stores nothing when the selection is entirely outside the element', () => {
+      document.body.innerHTML = '<p id="a">elsewhere</p><p id="b" data-annotate-dom-target="s1">pinned</p>'
+      const text = textOf('#a')
+      select(text, 0, text, 9)
+      expect(runInPage('s1')?.selectedText).toBeUndefined()
+    })
+
+    it('stores nothing when the selection is only whitespace', () => {
+      document.body.innerHTML = '<p id="a" data-annotate-dom-target="s1">say     there</p>'
+      const text = textOf('#a')
+      select(text, 4, text, 7)
+      expect(runInPage('s1')?.selectedText).toBeUndefined()
+    })
+
+    it('stores nothing when nothing is selected', () => {
+      document.body.innerHTML = '<p data-annotate-dom-target="s1">pinned</p>'
+      window.getSelection()?.removeAllRanges()
+      expect(runInPage('s1')?.selectedText).toBeUndefined()
+    })
+
+    it('cuts the text at 500 characters', () => {
+      document.body.innerHTML = `<p id="a" data-annotate-dom-target="s1">${'x'.repeat(800)}</p>`
+      const text = textOf('#a')
+      select(text, 0, text, 800)
+      expect(runInPage('s1')?.selectedText).toBe('x'.repeat(500))
+    })
+
+    it('does not throw for a selection inside an input', () => {
+      document.body.innerHTML = '<input id="i" value="typed value" data-annotate-dom-target="s1">'
+      const input = document.querySelector('input')
+      if (!input) throw new Error('fixture missing')
+      input.select()
+      expect(() => runInPage('s1')).not.toThrow()
+    })
+
+    it('does not throw for a selection inside a shadow root', () => {
+      document.body.innerHTML = '<div id="host" data-annotate-dom-target="s1"></div>'
+      const host = document.querySelector('#host')
+      const root = host?.attachShadow({ mode: 'open' })
+      if (!root) throw new Error('fixture missing')
+      root.innerHTML = '<span>shadow words</span>'
+      const inner = root.firstChild?.firstChild
+      if (!inner) throw new Error('fixture missing')
+      select(inner, 0, inner, 6)
+      expect(() => runInPage('s1')).not.toThrow()
+    })
+
+    it('leaves the page selection as it was', () => {
+      document.body.innerHTML = '<p id="a" data-annotate-dom-target="s1">say hello there</p>'
+      const text = textOf('#a')
+      select(text, 3, text, 12)
+      runInPage('s1')
+      const selection = window.getSelection()
+      expect(selection?.rangeCount).toBe(1)
+      expect(selection?.toString()).toBe(' hello th')
+      expect(selection?.anchorNode).toBe(text)
+      expect(selection?.anchorOffset).toBe(3)
+      expect(selection?.focusOffset).toBe(12)
+    })
+  })
+
   it('collects DOM, React owners, redacted props and hook state', () => {
     document.body.innerHTML = `
       <main style="display:flex">
