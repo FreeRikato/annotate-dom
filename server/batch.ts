@@ -91,6 +91,7 @@ async function storedPin(root: string, { crop: _crop, ...pin }: Pin & { readonly
     ...pin,
     elementSite,
     callSites,
+    ...(pin.also?.length ? { also: pin.also.map(target => ({ ...target, elementSite: absoluteLoc(root, target.elementSite) })) } : {}),
     cropFile: `pin-${pin.n}.png`,
     excerpts: await readExcerpts({ root, sites: [elementSite, ...callSites.map(site => site.loc)] }),
     status: 'open',

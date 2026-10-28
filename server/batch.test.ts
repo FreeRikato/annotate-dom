@@ -232,3 +232,15 @@ test('two pages whose paths slug alike keep separate viewport files', async () =
   const files = await readdir(join(root, '.annotations', folder))
   expect(files.filter(file => file.startsWith('viewport-'))).toHaveLength(2)
 })
+
+test('a pin with also keeps it in batch.json and prints it in batch.md; a pin without writes neither', async () => {
+  const also = [{ selector: 'button.cancel', locator: null, elementSite: null, box: { x: 1, y: 2, w: 3, h: 4 } }]
+  const batch = wireBatch()
+  const withAlso = wireBatch({ pins: batch.pins.map((pin, i) => (i === 0 ? { ...pin, also } : pin)) })
+  const { folder } = await writeBatch({ root, home, batch: withAlso })
+  const dirPath = join(root, '.annotations', folder)
+  const stored: StoredBatch = JSON.parse(await readFile(join(dirPath, 'batch.json'), 'utf8'))
+  expect(stored.pins[0]?.also).toEqual(also)
+  expect(stored.pins[1]).not.toHaveProperty('also')
+  expect(await readFile(join(dirPath, 'batch.md'), 'utf8')).toContain('  - `button.cancel`, box 1 2 3 4')
+})

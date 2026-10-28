@@ -1,5 +1,13 @@
 export type Box = { readonly x: number; readonly y: number; readonly w: number; readonly h: number }
 
+export function unionBox([first, ...rest]: readonly [Box, ...Box[]]): Box {
+  const left = Math.min(first.x, ...rest.map(b => b.x))
+  const top = Math.min(first.y, ...rest.map(b => b.y))
+  const right = Math.max(first.x + first.w, ...rest.map(b => b.x + b.w))
+  const bottom = Math.max(first.y + first.h, ...rest.map(b => b.y + b.h))
+  return { x: left, y: top, w: right - left, h: bottom - top }
+}
+
 export type Ancestor = { readonly selector: string; readonly styles: Readonly<Record<string, string>> }
 
 export type OwnerSnapshot = {
@@ -116,6 +124,13 @@ export type SourceLoc = { readonly file: string; readonly line: number; readonly
 
 export type CallSite = { readonly name: string; readonly loc: SourceLoc | null }
 
+export type AlsoTarget = {
+  readonly selector: string
+  readonly locator: string | null
+  readonly elementSite: SourceLoc | null
+  readonly box: Box
+}
+
 export type Pin = {
   readonly id: string
   readonly path: string
@@ -126,6 +141,7 @@ export type Pin = {
   readonly elementSite: SourceLoc | null
   readonly callSites: readonly CallSite[]
   readonly crop: string
+  readonly also?: readonly AlsoTarget[]
 }
 
 export type ViewportShot = {

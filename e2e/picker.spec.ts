@@ -607,3 +607,116 @@ test.describe('shadow roots and frames', () => {
     await tab.close()
   })
 })
+
+const TOGGLE_KEY = process.platform === 'darwin' ? 'Meta' : 'Control'
+
+test.describe('picking several elements', () => {
+  let tab: Page
+  let tabOverlay: Locator
+
+  test.beforeEach(async () => {
+    tab = await context.newPage()
+    await tab.bringToFront()
+    tabOverlay = tab.locator('annotate-dom-root')
+    await tab.goto(`${fixtureUrl}/multi`)
+    await toggleOverlay()
+    await expect(tabOverlay.locator('.panel')).toBeVisible()
+  })
+
+  test.afterEach(async () => {
+    await tab.close()
+  })
+
+  async function saveNote(note: string, count: number) {
+    await expect(tabOverlay.locator('.editor textarea')).toBeVisible({ timeout: 20_000 })
+    await tabOverlay.locator('.editor textarea').fill(note)
+    await tabOverlay.locator('.editor textarea').press('Enter')
+    await expect(tabOverlay.locator('.title')).toHaveText(`annotate-dom (${count})`, { timeout: 20_000 })
+    await expect(tabOverlay.locator('.panel button.primary')).toBeEnabled({ timeout: 20_000 })
+  }
+
+  async function lastStoredPin() {
+    return worker.evaluate(async () => {
+      const [multi] = await chrome.tabs.query({ url: '*://*/multi' })
+      const stored: Record<string, unknown> = await chrome.storage.local.get(`batch:${multi?.id}`)
+      const batch: unknown = Object.values(stored)[0]
+      const pins: unknown = batch && typeof batch === 'object' ? Reflect.get(batch, 'pins') : null
+      const viewports: unknown = batch && typeof batch === 'object' ? Reflect.get(batch, 'viewports') : null
+      const last: unknown = Array.isArray(pins) ? pins.at(-1) : null
+      if (!last || typeof last !== 'object') throw new Error('no pin stored')
+      const id: unknown = Reflect.get(last, 'id')
+      const crop: unknown = Reflect.get(last, 'crop')
+      const path: unknown = Reflect.get(last, 'path')
+      const also: unknown = Reflect.get(last, 'also')
+      if (typeof id !== 'string' || typeof crop !== 'string' || typeof path !== 'string' || !viewports || typeof viewports !== 'object') throw new Error('bad pin')
+      const shot: unknown = Reflect.get(viewports, path)
+      const rects: unknown = shot && typeof shot === 'object' ? Reflect.get(shot, 'rects') : null
+      const rect: unknown = rects && typeof rects === 'object' ? Reflect.get(rects, id) : null
+      const dpr: unknown = shot && typeof shot === 'object' ? Reflect.get(shot, 'dpr') : null
+      const bitmap = await createImageBitmap(await (await fetch(crop)).blob())
+      return { also: Array.isArray(also) ? also.length : 0, rect, dpr, cropWidth: bitmap.width, cropHeight: bitmap.height }
+    })
+  }
+
+  test('Cmd or Ctrl+click two buttons, Enter and save give one pin with an Also list and a union crop, and Escape clears the set', async () => {
+    const a = tab.locator('#a')
+    const far = tab.locator('#far')
+    await a.click({ modifiers: [TOGGLE_KEY] })
+    await far.click({ modifiers: [TOGGLE_KEY] })
+    await expect(tabOverlay.locator('.sel')).toHaveCount(2)
+    await expect(tabOverlay.locator('.sel-num')).toHaveText(['1', '2'])
+    await expect(tabOverlay.locator('.editor textarea')).toBeHidden()
+
+    await tab.keyboard.press('Escape')
+    await expect(tabOverlay.locator('.sel')).toHaveCount(0)
+    await expect(tabOverlay.locator('.editor textarea')).toBeHidden()
+
+    await far.click({ modifiers: [TOGGLE_KEY] })
+    await a.click({ modifiers: [TOGGLE_KEY] })
+    await a.click({ modifiers: [TOGGLE_KEY] })
+    await a.click({ modifiers: [TOGGLE_KEY] })
+    await expect(tabOverlay.locator('.sel-num')).toHaveText(['1', '2'])
+    await tab.keyboard.press('Enter')
+    await saveNote('align these', 1)
+
+    const boxA = await a.boundingBox()
+    const boxFar = await far.boundingBox()
+    if (!boxA || !boxFar) throw new Error('fixture buttons have no box')
+    const stored = await lastStoredPin()
+    expect(stored.also).toBe(1)
+    expect(stored.rect).toEqual({ x: boxA.x, y: boxA.y, w: boxFar.x + boxFar.width - boxA.x, h: boxFar.y + boxFar.height - boxA.y })
+    const scale = Number(stored.dpr)
+    expect(Math.abs(stored.cropWidth - (boxFar.x + boxFar.width - boxA.x + 80) * scale)).toBeLessThan(3)
+    expect(Math.abs(stored.cropHeight - (boxFar.y + boxFar.height - boxA.y + 80) * scale)).toBeLessThan(3)
+
+    const markdown = await copiedMarkdown(tab, tabOverlay)
+    expect(markdown).toContain('- Also:')
+    expect(markdown.match(/- Screenshot:/g)).toHaveLength(1)
+    expect(markdown).toContain('#far')
+
+    await tab.locator('#b').click()
+    await expect(tabOverlay.locator('.editor textarea')).toBeVisible({ timeout: 20_000 })
+    await expect(tabOverlay.locator('.sel')).toHaveCount(0)
+  })
+
+  test('dragging over three buttons selects them and a 5 px move is a click', async () => {
+    await tab.mouse.move(80, 180)
+    await tab.mouse.down()
+    await tab.mouse.move(300, 230, { steps: 5 })
+    await expect(tabOverlay.locator('.drag')).toBeVisible()
+    await tab.mouse.move(560, 260, { steps: 5 })
+    await tab.mouse.up()
+    await expect(tabOverlay.locator('.sel')).toHaveCount(3)
+    await expect(tabOverlay.locator('.drag')).toBeHidden()
+    await expect(tabOverlay.locator('.editor textarea')).toBeHidden()
+    await tab.keyboard.press('Escape')
+    await expect(tabOverlay.locator('.sel')).toHaveCount(0)
+
+    await tab.mouse.move(150, 220)
+    await tab.mouse.down()
+    await tab.mouse.move(155, 224)
+    await tab.mouse.up()
+    await expect(tabOverlay.locator('.sel')).toHaveCount(0)
+    await expect(tabOverlay.locator('.editor textarea')).toBeVisible({ timeout: 20_000 })
+  })
+})

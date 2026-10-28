@@ -161,3 +161,28 @@ test('projects.json lists the project after a batch', async () => {
   ws.close()
   expect(JSON.parse(await readFile(join(home, 'projects.json'), 'utf8'))).toEqual([project])
 })
+
+test('a batch with and without also is accepted, and also is stored with an absolute source path', async () => {
+  const file = join(project, 'components/a.tsx')
+  const base = batchOf(file)
+  const also = [{ selector: 'button.cancel', locator: null, elementSite: { file: 'components/b.tsx', line: 3, column: 1 }, box: { x: 1, y: 2, w: 3, h: 4 } }]
+  const withAlso = { ...base, pins: base.pins.map((pin, i) => (i === 0 ? { ...pin, also } : pin)) }
+  const ws = await connect(allowed)
+  const plain = await request(ws, { type: 'batch', reqId: 'r1', ...base })
+  const multi = await request(ws, { type: 'batch', reqId: 'r2', ...withAlso })
+  ws.close()
+  expect([plain.type, multi.type]).toEqual(['batch-saved', 'batch-saved'])
+  const stored = JSON.parse(await readFile(join(project, '.annotations', String(multi.folder), 'batch.json'), 'utf8'))
+  expect(stored.pins[0].also).toEqual([{ ...also[0], elementSite: { file: join(project, 'components/b.tsx'), line: 3, column: 1 } }])
+  expect(stored.pins[1]).not.toHaveProperty('also')
+  expect(await readFile(join(project, '.annotations', String(multi.folder), 'batch.md'), 'utf8')).toContain('- Also:')
+})
+
+test('a batch whose also entry is malformed is refused', async () => {
+  const base = batchOf(join(project, 'components/a.tsx'))
+  const bad = { ...base, pins: base.pins.map(pin => ({ ...pin, also: [{ selector: 'x' }] })) }
+  const ws = await connect(allowed)
+  const reply = await request(ws, { type: 'batch', reqId: 'r1', ...bad })
+  ws.close()
+  expect(reply).toEqual({ type: 'error', reqId: 'r1', message: 'invalid batch' })
+})

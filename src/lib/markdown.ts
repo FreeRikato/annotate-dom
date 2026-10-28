@@ -1,5 +1,5 @@
 import { classifySourcePath } from './callsites'
-import type { BoxModel, DetailLevel, Pin, SourceLoc } from './types'
+import type { AlsoTarget, BoxModel, DetailLevel, Pin, SourceLoc } from './types'
 
 export type Excerpt = { readonly file: string; readonly line: number; readonly startLine: number; readonly code: string }
 
@@ -73,6 +73,11 @@ function boxModelLine({ margin, padding, border }: BoxModel): string {
   return `- Box model: margin ${margin.join(' ')}, padding ${padding.join(' ')}, border ${border.join(' ')}`
 }
 
+function alsoLine({ selector, elementSite, box }: AlsoTarget): string {
+  const site = elementSite ? ` at ${elementSite.file}:${elementSite.line}` : ''
+  return `  - ${code(selector)}${site}, box ${box.x} ${box.y} ${box.w} ${box.h}`
+}
+
 function stamp(ms: number): string {
   const d = new Date(ms)
   const pad = (n: number) => String(n).padStart(2, '0')
@@ -108,6 +113,7 @@ function pinSection({ pin, cropFile, excerpts = [] }: ExportPin, n: number): str
   }
   lines.push(`- Selector: ${code(ins.selector)}`)
   if (ins.locator) lines.push(`- Locator: ${code(ins.locator)}`)
+  if (pin.also?.length) lines.push('- Also:', ...pin.also.map(alsoLine))
   if (ins.tokens?.classes.length) lines.push(`- Classes: ${code(ins.tokens.classes.join(' '))}`)
   if (ins.tokens?.values.length) {
     lines.push(`- Tokens: ${ins.tokens.values.map(v => `${v.prop}: ${v.value} ${v.token ? `= ${v.token}` : '(no token)'}`).join('; ')}`)
@@ -172,7 +178,8 @@ function compactLine({ pin }: ExportPin, n: number): string[] {
   const site = pin.elementSite
   const { selectedText } = pin.inspection
   const where = `${n}. **${pin.inspection.selector}** (${site ? `${site.file}:${site.line}` : 'no source'})`
-  const line = pin.note ? `${where}: ${pin.note.split('\n')[0]}` : where
+  const more = pin.also?.length ? ` (+${pin.also.length} more)` : ''
+  const line = (pin.note ? `${where}: ${pin.note.split('\n')[0]}` : where) + more
   const heading = pin.note ? [] : [`### ${pin.inspection.selector}`]
   return [...heading, line, ...(selectedText ? [selectedTextLine(selectedText)] : [])]
 }
