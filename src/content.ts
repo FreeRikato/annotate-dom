@@ -5,6 +5,7 @@ import { parseSavedLevel, sendLabel, SETTINGS_KEY } from './lib/daemon'
 import { FOCUSED_ATTR, HOVERED_ATTR, MARKER_ATTR, type Reply, type Request, type Responses } from './lib/messages'
 import { withSelectedCallSites } from './lib/callsites'
 import { pageKey } from './lib/page'
+import { connectorBetween, placeCard } from './lib/place'
 import { dragRect, isDrag, pickTarget, selectInRect, type Point } from './lib/pick'
 import { createResolver } from './lib/resolve'
 import { callSiteFrame, nextBasePath } from './lib/stack'
@@ -51,6 +52,8 @@ button:disabled { opacity: .4; cursor: default; }
 .editor textarea { box-sizing: border-box; width: 100%; min-height: 70px; resize: vertical; font: inherit; color: #f4f4f5; background: #09090b; border: 1px solid #3f3f46; border-radius: 6px; padding: 6px; }
 .editor .row { display: flex; gap: 6px; justify-content: flex-end; margin-top: 6px; align-items: center; }
 .editor .hint { flex: 1; color: #a1a1aa; font-size: 11px; }
+.link { position: fixed; left: 0; top: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; display: none; }
+.link line { stroke: #ff3b30; stroke-width: 1.5; stroke-dasharray: 4 3; }
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: #18181b; border: 1px solid #3f3f46; border-radius: 8px; padding: 8px 12px; display: none; gap: 10px; align-items: center; pointer-events: auto; }
 .fallback { display: none; padding: 8px 10px; border-top: 1px solid #3f3f46; }
 .fallback textarea { box-sizing: border-box; width: 100%; height: 120px; font: 11px ui-monospace, monospace; color: #f4f4f5; background: #09090b; border: 1px solid #3f3f46; border-radius: 6px; }
@@ -131,6 +134,11 @@ function start(): () => void {
   editorRow.append(h('span', { className: 'hint', text: 'Enter saves, Shift+Enter new line' }), cancelBtn, saveBtn)
   editor.append(textarea, editorRow)
 
+  const linkSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+  linkSvg.setAttribute('class', 'link')
+  const linkLine = document.createElementNS('http://www.w3.org/2000/svg', 'line')
+  linkSvg.append(linkLine)
+
   const toast = h('div', { className: 'toast' })
   const toastText = h('span')
   const undoBtn = h('button', { text: 'Undo' })
@@ -139,7 +147,7 @@ function start(): () => void {
   const dragBox = h('div', { className: 'drag' })
   const selection = h('div')
 
-  root.append(hl, dragBox, selection, markers, shieldLayer, panel, editor, toast)
+  root.append(hl, dragBox, selection, markers, shieldLayer, panel, linkSvg, editor, toast)
   shadow.append(style, root)
   document.documentElement.append(host)
 
@@ -296,13 +304,23 @@ function start(): () => void {
     return tracked
   }
 
+  function layoutEditor() {
+    if (!editing) return
+    const target = unionBox([boxOf(editing), ...pending.slice(1).map(boxOf)])
+    const panelRect = panel.getBoundingClientRect()
+    const others = visible && panelRect.width > 0 ? [{ x: panelRect.x, y: panelRect.y, w: panelRect.width, h: panelRect.height }] : []
+    const card = { w: editor.offsetWidth, h: editor.offsetHeight }
+    const { x, y } = placeCard({ target, card, viewport: { w: innerWidth, h: innerHeight }, others })
+    Object.assign(editor.style, { left: `${x}px`, top: `${y}px` })
+    const line = connectorBetween({ x, y, ...card }, target)
+    for (const [name, value] of Object.entries(line)) linkLine.setAttribute(name, String(value))
+    linkSvg.style.display = 'block'
+  }
+
   function placeEditor(el: Element) {
     showHighlight(el)
-    const r = topRect(el)
-    const left = Math.min(Math.max(8, r.left), innerWidth - 316)
-    const below = r.bottom + 8
-    const top = below + 130 < innerHeight ? below : Math.max(8, r.top - 138)
-    Object.assign(editor.style, { display: 'block', left: `${left}px`, top: `${top}px` })
+    editor.style.display = 'block'
+    layoutEditor()
     textarea.value = ''
     textarea.focus()
   }
@@ -355,6 +373,7 @@ function start(): () => void {
     editing = null
     pending = []
     editor.style.display = 'none'
+    linkSvg.style.display = 'none'
     showHighlight(null)
   }
 
@@ -726,7 +745,10 @@ function start(): () => void {
       renderMarkers()
       renderSelection()
       syncFrames()
-      if (editing) showHighlight(editing)
+      if (editing) {
+        showHighlight(editing)
+        if (editor.style.display === 'block') layoutEditor()
+      }
       else if (picking && target) showHighlight(target, pickPosition())
     }
     requestAnimationFrame(tick)
