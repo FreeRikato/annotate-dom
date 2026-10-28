@@ -31,6 +31,13 @@ const backdropPage = () => `<!doctype html>
 <body><h1>Backdrop</h1><button id="go" type="button">Continue</button><div id="backdrop"></div></body>
 </html>`
 
+const nestedPage = () => `<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Fixture nested</title>
+<style>body{font-family:sans-serif;margin:40px;height:3000px}#outer{padding:24px;background:#eef}#inner{padding:16px;background:#dde}#deep{padding:8px 24px;font-size:16px}</style></head>
+<body><main id="outer"><section id="inner"><button id="deep" type="button">Deep</button></section></main></body>
+</html>`
+
 Bun.serve({
   port,
   hostname: 'localhost',
@@ -43,6 +50,7 @@ Bun.serve({
     if (url.pathname === '/settings') return new Response(page(), { headers: { 'content-type': 'text/html' } })
     if (url.pathname === '/router') return new Response(routerPage(), { headers: { 'content-type': 'text/html' } })
     if (url.pathname === '/backdrop') return new Response(backdropPage(), { headers: { 'content-type': 'text/html' } })
+    if (url.pathname === '/nested') return new Response(nestedPage(), { headers: { 'content-type': 'text/html' } })
     return new Response('not found', { status: 404 })
   },
 })
