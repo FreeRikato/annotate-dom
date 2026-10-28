@@ -228,6 +228,21 @@ function onTabLoaded(tabId: number): Promise<void> {
   })
 }
 
+const CAPTURE_QUOTA_WAIT_MS = 250
+const CAPTURE_QUOTA_RETRIES = 6
+
+export async function captureVisible(windowId: number): Promise<string> {
+  for (let retries = 0; ; retries++) {
+    try {
+      return await chrome.tabs.captureVisibleTab(windowId, { format: 'png' })
+    } catch (err: unknown) {
+      const refused = err instanceof Error && err.message.includes('MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND')
+      if (!refused || retries >= CAPTURE_QUOTA_RETRIES) throw err
+      await new Promise(resolve => setTimeout(resolve, CAPTURE_QUOTA_WAIT_MS))
+    }
+  }
+}
+
 async function captureTab(tabId: number): Promise<string> {
   const target = { tabId }
   await chrome.debugger.attach(target, CDP_VERSION)
@@ -289,7 +304,7 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
     case 'inspect':
       return inspectTab({ tabId, frameId: sender.frameId ?? 0, marker: req.marker })
     case 'capture': {
-      const viewport = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' })
+      const viewport = await captureVisible(tab.windowId)
       const image = await decode(viewport)
       const scale = image.width / req.viewportWidth
       return { viewport, crop: await crop({ image, rect: req.rect, scale }), dpr: scale }

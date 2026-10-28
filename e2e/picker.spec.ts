@@ -310,3 +310,193 @@ test('the level menu follows a level saved from another tab', async () => {
   await first.close()
   await second.close()
 })
+
+type Motion = { readonly spin: number; readonly fade: number; readonly waapi: string; readonly videoPaused: boolean }
+
+const readMotion = (tab: Page): Promise<Motion> =>
+  tab.evaluate(() => ({
+    spin: document.getElementById('spin')?.getBoundingClientRect().width ?? 0,
+    fade: document.getElementById('fade')?.getBoundingClientRect().width ?? 0,
+    waapi: getComputedStyle(document.getElementById('waapi') ?? document.body).opacity,
+    videoPaused: document.querySelector('video')?.paused ?? true,
+  }))
+
+test.describe('the page holds still while the note editor is open', () => {
+  let tab: Page
+  let tabOverlay: Locator
+
+  test.beforeAll(async () => {
+    tab = await context.newPage()
+    await tab.bringToFront()
+    tabOverlay = tab.locator('annotate-dom-root')
+    await tab.goto(`${fixtureUrl}/animated`)
+    await expect.poll(async () => (await readMotion(tab)).videoPaused).toBe(false)
+    await toggleOverlay()
+    await expect(tabOverlay.locator('.panel')).toBeVisible()
+    await tabOverlay.locator('.hl').evaluate(el => el.animate([{ opacity: 1 }, { opacity: 0.9 }], { duration: 1000, iterations: Infinity }))
+  })
+
+  test.afterAll(async () => {
+    await tab.close()
+  })
+
+  async function openEditorOnTarget() {
+    await tab.locator('#fade').hover({ force: true })
+    await tab.locator('#target').click()
+    await expect(tabOverlay.locator('.editor textarea')).toBeVisible()
+  }
+
+  async function expectHeld() {
+    const before = await readMotion(tab)
+    await tab.waitForTimeout(500)
+    expect(await readMotion(tab)).toEqual(before)
+    expect(before.videoPaused).toBe(true)
+  }
+
+  async function expectMoving() {
+    await expect.poll(async () => {
+      const first = await readMotion(tab)
+      await tab.waitForTimeout(300)
+      const second = await readMotion(tab)
+      return first.spin !== second.spin && first.waapi !== second.waapi && !second.videoPaused
+    }).toBe(true)
+  }
+
+  async function expectOverlayAnimating() {
+    const time = () => tabOverlay.locator('.hl').evaluate(el => Number(el.getAnimations()[0]?.currentTime ?? -1))
+    const before = await time()
+    await tab.waitForTimeout(200)
+    expect(await time()).toBeGreaterThan(before)
+  }
+
+  for (const [name, finish] of [
+    ['save', async () => {
+      await tabOverlay.locator('.editor textarea').fill('hold still')
+      await tabOverlay.locator('.editor textarea').press('Enter')
+      await expect(tabOverlay.locator('.title')).toHaveText(/annotate-dom \(\d+\)/)
+      await expect(tabOverlay.locator('.panel button.primary')).toBeEnabled({ timeout: 20_000 })
+    }],
+    ['Escape', () => tab.keyboard.press('Escape')],
+    ['Cancel', () => tabOverlay.getByRole('button', { name: 'Cancel' }).click()],
+  ] as const) {
+    test(`animations, transitions and video stay still until ${name}, then move again`, async () => {
+      await tab.keyboard.press('Escape')
+      await tabOverlay.locator('button', { hasText: 'Pick' }).click()
+      await expectMoving()
+      await openEditorOnTarget()
+      await expectHeld()
+      await expectOverlayAnimating()
+      await finish()
+      await expectMoving()
+    })
+  }
+
+  test('a pin on an element that changes after the click keeps the click-time state in its crop and text', async () => {
+    await tab.keyboard.press('Escape')
+    await tabOverlay.locator('button', { hasText: 'Pick' }).click()
+    await tab.locator('#late').click()
+    await expect(tabOverlay.locator('.editor textarea')).toBeVisible()
+    await tab.waitForTimeout(1500)
+    expect(await tab.locator('#late').textContent()).toBe('Done')
+    await tabOverlay.locator('.editor textarea').fill('what does this say')
+    await tabOverlay.locator('.editor textarea').press('Enter')
+    await expect(tabOverlay.locator('.title')).toHaveText(/annotate-dom \(\d+\)/)
+    await expect(tabOverlay.locator('.panel button.primary')).toBeEnabled({ timeout: 20_000 })
+
+    const crop = await worker.evaluate(async () => {
+      const [animated] = await chrome.tabs.query({ url: '*://*/animated' })
+      const stored: Record<string, unknown> = await chrome.storage.local.get(`batch:${animated?.id}`)
+      const batch = Object.values(stored)[0]
+      const pins: unknown = batch && typeof batch === 'object' ? Reflect.get(batch, 'pins') : null
+      const last: unknown = Array.isArray(pins) ? pins.at(-1) : null
+      const url: unknown = last && typeof last === 'object' ? Reflect.get(last, 'crop') : null
+      if (typeof url !== 'string') throw new Error('no crop stored')
+      const bitmap = await createImageBitmap(await (await fetch(url)).blob())
+      const canvas = new OffscreenCanvas(bitmap.width, bitmap.height)
+      const ctx = canvas.getContext('2d')
+      if (!ctx) throw new Error('no 2d context')
+      ctx.drawImage(bitmap, 0, 0)
+      const { data } = ctx.getImageData(0, 0, bitmap.width, bitmap.height)
+      let green = 0
+      let red = 0
+      for (let i = 0; i < data.length; i += 4) {
+        if (data[i] < 80 && data[i + 1] > 150 && data[i + 2] < 80) green += 1
+        if (data[i] > 170 && data[i + 1] < 60 && data[i + 2] < 60) red += 1
+      }
+      return { green, red }
+    })
+    expect(crop.green).toBeGreaterThan(crop.red)
+
+    await tabOverlay.getByRole('button', { name: 'Copy all' }).click()
+    await expect(tabOverlay.locator('.toast')).toContainText('Copied ', { timeout: 20_000 })
+    const markdown = await tab.evaluate(() => navigator.clipboard.readText())
+    expect(markdown).toContain('Loading')
+    expect(markdown).not.toContain('"Done"')
+  })
+})
+
+test.describe('motion inside frames and quick re-clicks', () => {
+  test('an animation in a same-origin html frame and in an svg frame is held while the editor is open and resumes after save', async () => {
+    const tab = await context.newPage()
+    await tab.bringToFront()
+    const tabOverlay = tab.locator('annotate-dom-root')
+    await tab.goto(`${fixtureUrl}/motion-frames`)
+    await toggleOverlay()
+    await expect(tabOverlay.locator('.panel')).toBeVisible()
+    const barWidths = () =>
+      Promise.all(['/inner-motion', '/inner-motion.svg'].map(path => {
+        const frame = tab.frames().find(f => f.url().endsWith(path))
+        if (!frame) throw new Error(`no frame ${path}`)
+        return frame.evaluate(() => document.getElementById('bar')?.getBoundingClientRect().width ?? 0)
+      }))
+    const moving = async () => {
+      const first = await barWidths()
+      await tab.waitForTimeout(300)
+      const second = await barWidths()
+      return first[0] !== second[0] && first[1] !== second[1]
+    }
+    await expect.poll(moving).toBe(true)
+
+    await tab.locator('#target').click()
+    await expect(tabOverlay.locator('.editor textarea')).toBeVisible()
+    const held = await barWidths()
+    await tab.waitForTimeout(500)
+    expect(await barWidths()).toEqual(held)
+
+    await tabOverlay.locator('.editor textarea').fill('frames hold still')
+    await tabOverlay.locator('.editor textarea').press('Enter')
+    await expect(tabOverlay.locator('.title')).toHaveText('annotate-dom (1)', { timeout: 20_000 })
+    await expect(tabOverlay.locator('.panel button.primary')).toBeEnabled({ timeout: 20_000 })
+    await expect.poll(moving).toBe(true)
+    await tab.close()
+  })
+
+  test('opening the editor when Chrome refuses the first screenshot for its rate limit retries and opens', async () => {
+    const tab = await context.newPage()
+    await tab.bringToFront()
+    const tabOverlay = tab.locator('annotate-dom-root')
+    await tab.goto(`${fixtureUrl}/multi`)
+    await toggleOverlay()
+    await expect(tabOverlay.locator('.panel')).toBeVisible()
+    await worker.evaluate(() => {
+      const real = chrome.tabs.captureVisibleTab.bind(chrome.tabs)
+      let refused = false
+      Reflect.set(globalThis, 'restoreCapture', () => Reflect.set(chrome.tabs, 'captureVisibleTab', real))
+      Reflect.set(chrome.tabs, 'captureVisibleTab', async (...args: Parameters<typeof real>) => {
+        if (!refused) {
+          refused = true
+          throw new Error('This request exceeds the MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND quota.')
+        }
+        return real(...args)
+      })
+    })
+    try {
+      await tab.locator('#a').click()
+      await expect(tabOverlay.locator('.editor textarea')).toBeVisible({ timeout: 5_000 })
+      await expect(tabOverlay.locator('.toast')).toBeHidden()
+    } finally {
+      await worker.evaluate(() => Reflect.get(globalThis, 'restoreCapture')())
+      await tab.close()
+    }
+  })
+})
