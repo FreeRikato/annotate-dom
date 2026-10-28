@@ -3,6 +3,7 @@ import { sendLabel, SETTINGS_KEY } from './lib/daemon'
 import { FOCUSED_ATTR, HOVERED_ATTR, MARKER_ATTR, type Reply, type Request, type Responses } from './lib/messages'
 import { withSelectedCallSites } from './lib/callsites'
 import { pageKey } from './lib/page'
+import { pickTarget } from './lib/pick'
 import { createResolver } from './lib/resolve'
 import { callSiteFrame, nextBasePath } from './lib/stack'
 import { DETAIL_LEVELS, emptyBatch, isDetailLevel, PROJECT_ROOT_NOT_FOUND, type Batch, type Box, type Pin } from './lib/types'
@@ -309,6 +310,10 @@ function start(): () => void {
 
   function fromPage(event: Event): Element | null {
     if (event.composedPath().includes(host)) return null
+    if (event instanceof MouseEvent) {
+      const candidates = document.elementsFromPoint(event.clientX, event.clientY)
+      return pickTarget({ candidates, viewport: { width: innerWidth, height: innerHeight }, overlayHost: host })
+    }
     const first = event.composedPath()[0]
     return first instanceof Element ? first : null
   }
