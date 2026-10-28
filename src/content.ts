@@ -1,4 +1,5 @@
 import { copyText } from './lib/clipboard'
+import { freezePage } from './lib/freeze'
 import { parseSavedLevel, sendLabel, SETTINGS_KEY } from './lib/daemon'
 import { FOCUSED_ATTR, HOVERED_ATTR, MARKER_ATTR, type Reply, type Request, type Responses } from './lib/messages'
 import { withSelectedCallSites } from './lib/callsites'
@@ -6,7 +7,7 @@ import { pageKey } from './lib/page'
 import { pickTarget } from './lib/pick'
 import { createResolver } from './lib/resolve'
 import { callSiteFrame, nextBasePath } from './lib/stack'
-import { DETAIL_LEVELS, emptyBatch, PROJECT_ROOT_NOT_FOUND, type Batch, type Box, type Pin } from './lib/types'
+import { DETAIL_LEVELS, emptyBatch, PROJECT_ROOT_NOT_FOUND, type Batch, type Box, type Inspection, type Pin, type SourceLoc } from './lib/types'
 
 const GLOBAL_KEY = '__annotateDomToggle'
 const DAEMON_POLL_MS = 2000
@@ -77,6 +78,15 @@ function shortFile(file: string): string {
   return file.split('/').slice(-2).join('/')
 }
 
+type PinContext = { readonly focused: Element | null; readonly hovered: Element | null }
+type PinCapture = {
+  readonly id: string
+  readonly sites: Promise<{ inspection: Inspection; elementSite: SourceLoc | null; callSites: Pin['callSites'] }>
+  readonly shot: Responses['capture']
+  readonly rects: Record<string, Box>
+}
+type EditorSession = { readonly token: { cancelled: boolean }; readonly release: () => void; readonly ready: Promise<PinCapture | null> }
+
 function start(): () => void {
   const host = document.createElement('annotate-dom-root')
   const shadow = host.attachShadow({ mode: 'open' })
@@ -138,8 +148,8 @@ function start(): () => void {
   let chainIndex = 0
   let walking = false
   let editing: Element | null = null
-  let pinContext: { readonly focused: Element | null; readonly hovered: Element | null } = { focused: null, hovered: null }
-  let pinSelection: Range | null = null
+  let session: EditorSession | null = null
+  const frozen = new Set<() => void>()
   let lastPath = pageKey(location)
   let toastTimer = 0
 
@@ -248,11 +258,17 @@ function start(): () => void {
     }
   }
 
-  function openEditor(el: Element) {
-    editing = el
-    pinContext = readPinContext()
-    const selection = getSelection()
-    pinSelection = selection && selection.rangeCount > 0 ? selection.getRangeAt(0).cloneRange() : null
+  function freeze(): () => void {
+    const release = freezePage({ root: document, overlayHost: host })
+    const tracked = () => {
+      frozen.delete(tracked)
+      release()
+    }
+    frozen.add(tracked)
+    return tracked
+  }
+
+  function placeEditor(el: Element) {
     showHighlight(el)
     const r = el.getBoundingClientRect()
     const left = Math.min(Math.max(8, r.left), innerWidth - 316)
@@ -263,11 +279,45 @@ function start(): () => void {
     textarea.focus()
   }
 
-  function restoreSelection(range: Range | null) {
-    const selection = getSelection()
-    if (!range || !selection) return
-    selection.removeAllRanges()
-    selection.addRange(range)
+  async function capturePin(el: Element, context: PinContext, token: { cancelled: boolean }): Promise<PinCapture | null> {
+    const id = crypto.randomUUID()
+    const inspection = await markAndInspect(el, id, context)
+    if (token.cancelled) return null
+    host.style.visibility = 'hidden'
+    let shot
+    let rect
+    const rects: Record<string, Box> = {}
+    try {
+      await nextFrame()
+      await nextFrame()
+      rect = boxOf(el)
+      rects[id] = rect
+      for (const pin of batch.pins) {
+        if (pin.path !== pageKey(location)) continue
+        const other = locate(pin)
+        if (other) rects[pin.id] = boxOf(other)
+      }
+      shot = await call({ kind: 'capture', rect, viewportWidth: innerWidth })
+    } finally {
+      host.style.visibility = ''
+    }
+    if (token.cancelled) return null
+    placeEditor(el)
+    return { id, sites: resolveSites(inspection), shot, rects }
+  }
+
+  function openEditor(el: Element) {
+    cancelEditor()
+    const token = { cancelled: false }
+    const current: EditorSession = { token, release: freeze(), ready: capturePin(el, readPinContext(), token) }
+    session = current
+    editing = el
+    showHighlight(el)
+    current.ready.catch((err: unknown) => {
+      if (session !== current) return
+      cancelEditor()
+      setToast(`Could not open the note: ${err instanceof Error ? err.message : String(err)}`, false)
+    })
   }
 
   function closeEditor() {
@@ -276,7 +326,16 @@ function start(): () => void {
     showHighlight(null)
   }
 
-  async function inspectPinned(el: Element, id: string, { focused, hovered }: typeof pinContext) {
+  function cancelEditor() {
+    if (session) {
+      session.token.cancelled = true
+      session.release()
+      session = null
+    }
+    closeEditor()
+  }
+
+  async function markAndInspect(el: Element, id: string, { focused, hovered }: PinContext) {
     el.setAttribute(MARKER_ATTR, id)
     focused?.setAttribute(FOCUSED_ATTR, '')
     hovered?.setAttribute(HOVERED_ATTR, '')
@@ -289,6 +348,10 @@ function start(): () => void {
       hovered?.removeAttribute(HOVERED_ATTR)
     }
     if (!inspection) throw new Error('Element is gone')
+    return inspection
+  }
+
+  async function resolveSites(inspection: Inspection) {
     const [elementSite, ...ownerSites] = await resolver.resolveAll([
       callSiteFrame(inspection.react?.elementStack ?? null),
       ...(inspection.react?.owners ?? []).map(o => callSiteFrame(o.stack)),
@@ -297,32 +360,19 @@ function start(): () => void {
     return { inspection: selected.inspection, elementSite: elementSite ?? null, callSites: selected.callSites }
   }
 
-  async function savePin(el: Element, note: string) {
+  async function inspectPinned(el: Element, id: string, context: PinContext) {
+    return resolveSites(await markAndInspect(el, id, context))
+  }
+
+  async function savePin(current: EditorSession, note: string) {
     busy = true
     renderList()
-    const id = crypto.randomUUID()
     try {
-      restoreSelection(pinSelection)
-      const { inspection, elementSite, callSites } = await inspectPinned(el, id, pinContext)
-
-      host.style.visibility = 'hidden'
-      await nextFrame()
-      await nextFrame()
-      const rect = boxOf(el)
-      const rects: Record<string, Box> = { [id]: rect }
-      for (const pin of batch.pins) {
-        if (pin.path !== pageKey(location)) continue
-        const other = locate(pin)
-        if (other) rects[pin.id] = boxOf(other)
-      }
-      let shot
-      try {
-        shot = await call({ kind: 'capture', rect, viewportWidth: innerWidth })
-      } finally {
-        host.style.visibility = ''
-      }
+      const captured = await current.ready
+      if (!captured) return
+      const { inspection, elementSite, callSites } = await captured.sites
       const pin: Pin = {
-        id,
+        id: captured.id,
         path: pageKey(location),
         url: location.href,
         note,
@@ -330,12 +380,13 @@ function start(): () => void {
         inspection,
         elementSite,
         callSites,
-        crop: shot.crop,
+        crop: captured.shot.crop,
       }
-      batch = await call({ kind: 'add-pin', pin, viewport: shot.viewport, dpr: shot.dpr, rects })
+      batch = await call({ kind: 'add-pin', pin, viewport: captured.shot.viewport, dpr: captured.shot.dpr, rects: captured.rects })
     } catch (err: unknown) {
       setToast(`Could not save: ${err instanceof Error ? err.message : String(err)}`, false)
     } finally {
+      current.release()
       busy = false
       renderList()
     }
@@ -425,7 +476,7 @@ function start(): () => void {
 
   function onKey(event: KeyboardEvent) {
     if (!visible || event.key !== 'Escape') return
-    if (editing) closeEditor()
+    if (editing) cancelEditor()
     else if (picking) {
       picking = false
       showHighlight(null)
@@ -436,11 +487,12 @@ function start(): () => void {
   }
 
   function submit() {
-    const el = editing
+    const current = session
     const note = textarea.value.trim()
-    if (!el || !note) return
+    if (!current || !editing || !note) return
+    session = null
     closeEditor()
-    void savePin(el, note)
+    void savePin(current, note)
   }
 
   textarea.addEventListener('keydown', event => {
@@ -450,14 +502,14 @@ function start(): () => void {
       submit()
     } else if (event.key === 'Escape') {
       event.preventDefault()
-      closeEditor()
+      cancelEditor()
     }
   })
   saveBtn.addEventListener('click', submit)
-  cancelBtn.addEventListener('click', closeEditor)
+  cancelBtn.addEventListener('click', cancelEditor)
   pickBtn.addEventListener('click', () => {
     picking = !picking
-    if (!picking) closeEditor()
+    if (!picking) cancelEditor()
     renderList()
   })
   closeBtn.addEventListener('click', () => setVisible(false))
@@ -512,6 +564,9 @@ function start(): () => void {
   window.addEventListener('keydown', onKey, opts)
   window.addEventListener('keyup', onKeyUp, opts)
   window.addEventListener('wheel', onWheel, { capture: true, passive: false })
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) for (const release of [...frozen]) release()
+  })
 
   function tick() {
     if (!host.isConnected) document.documentElement.append(host)
@@ -531,7 +586,7 @@ function start(): () => void {
     visible = next
     picking = next
     host.style.display = next ? '' : 'none'
-    if (!next) closeEditor()
+    if (!next) cancelEditor()
     renderList()
   }
 

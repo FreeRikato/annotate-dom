@@ -38,6 +38,61 @@ const nestedPage = () => `<!doctype html>
 <body><main id="outer"><section id="inner"><button id="deep" type="button">Deep</button></section></main></body>
 </html>`
 
+const animatedPage = () => `<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Fixture animated</title>
+<style>
+body{font-family:sans-serif;margin:40px}
+.row{display:block;height:24px;margin:6px 0;background:#9cf}
+@keyframes grow{from{width:50px}to{width:250px}}
+#spin{animation:grow 2s linear infinite alternate}
+#fade{width:50px;transition:width 3s linear}
+#fade.on{width:300px}
+#target{padding:8px 24px;font-size:16px}
+#late{display:inline-block;width:140px;height:40px;line-height:40px;text-align:center;background:#0c0}
+#late.done{background:#c00;color:#fff}
+</style></head>
+<body>
+<div id="spin" class="row"></div>
+<div id="fade" class="row"></div>
+<div id="waapi" class="row" style="width:200px"></div>
+<video id="clip" muted playsinline width="80" height="45"></video>
+<canvas id="feed" width="80" height="45" hidden></canvas>
+<p><button id="target" type="button">Pin me</button></p>
+<p><span id="late">Loading</span></p>
+<script>
+document.getElementById('fade').addEventListener('mouseenter', e => e.currentTarget.classList.add('on'))
+document.getElementById('waapi').animate([{ opacity: 1 }, { opacity: 0.2 }], { duration: 2000, iterations: Infinity, direction: 'alternate' })
+const late = document.getElementById('late')
+late.addEventListener('mouseenter', () => setTimeout(() => { late.textContent = 'Done'; late.className = 'done' }, 1000), { once: true })
+const feed = document.getElementById('feed')
+const paint = feed.getContext('2d')
+setInterval(() => { paint.fillStyle = 'hsl(' + (Date.now() / 10 % 360) + ',80%,50%)'; paint.fillRect(0, 0, 80, 45) }, 30)
+const clip = document.getElementById('clip')
+clip.srcObject = feed.captureStream(30)
+clip.play()
+</script></body>
+</html>`
+
+const motionFramesPage = () => `<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Fixture motion frames</title>
+<style>body{font-family:sans-serif;margin:40px}iframe{display:block;width:320px;height:60px;border:2px solid #888;margin:8px 0}#target{padding:8px 24px;font-size:16px}</style></head>
+<body><iframe id="html" src="/inner-motion"></iframe><iframe id="svg" src="/inner-motion.svg"></iframe>
+<p><button id="target" type="button">Pin me</button></p></body>
+</html>`
+
+const innerMotionPage = () => `<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Inner motion</title>
+<style>body{margin:8px}@keyframes grow{from{width:20px}to{width:240px}}#bar{height:20px;background:#9cf;animation:grow 2s linear infinite alternate}</style></head>
+<body><div id="bar"></div></body>
+</html>`
+
+const innerMotionSvg = () => `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="60">
+<style>@keyframes grow{from{width:20px}to{width:240px}}#bar{animation:grow 2s linear infinite alternate}</style>
+<rect id="bar" x="8" y="8" width="20" height="20" fill="#0c0"/></svg>`
+
 Bun.serve({
   port,
   hostname: 'localhost',
@@ -51,6 +106,10 @@ Bun.serve({
     if (url.pathname === '/router') return new Response(routerPage(), { headers: { 'content-type': 'text/html' } })
     if (url.pathname === '/backdrop') return new Response(backdropPage(), { headers: { 'content-type': 'text/html' } })
     if (url.pathname === '/nested') return new Response(nestedPage(), { headers: { 'content-type': 'text/html' } })
+    if (url.pathname === '/motion-frames') return new Response(motionFramesPage(), { headers: { 'content-type': 'text/html' } })
+    if (url.pathname === '/inner-motion') return new Response(innerMotionPage(), { headers: { 'content-type': 'text/html' } })
+    if (url.pathname === '/inner-motion.svg') return new Response(innerMotionSvg(), { headers: { 'content-type': 'image/svg+xml' } })
+    if (url.pathname === '/animated') return new Response(animatedPage(), { headers: { 'content-type': 'text/html' } })
     return new Response('not found', { status: 404 })
   },
 })
