@@ -72,25 +72,25 @@ export function createResolver({
   const maps = new Map<string, MapLoad>()
   const limited = createLimiter(MAX_CONCURRENT_FETCHES)
 
-  function fetchText(url: string, isAwaited: () => boolean): Promise<string> {
-    return limited(() =>
-      withTimeout(async signal => {
-        if (!isAwaited()) throw new Error(`no resolve still waits for ${url}`)
-        const res = await fetcher(url, { signal })
-        if (!res.ok) throw new Error(`${url} responded ${res.status}`)
-        return res.text()
-      }),
-    )
+  function fetchText(url: string): Promise<string> {
+    return withTimeout(async signal => {
+      const res = await fetcher(url, { signal })
+      if (!res.ok) throw new Error(`${url} responded ${res.status}`)
+      return res.text()
+    })
   }
 
-  async function loadMap(chunkUrl: string, isAwaited: () => boolean): Promise<TraceMap | null> {
-    const js = await fetchText(chunkUrl, isAwaited)
-    const ref = lastSourceMappingUrl(js)
-    if (!ref) return null
-    const mapUrl = new URL(ref, chunkUrl).href
-    const text = await fetchText(mapUrl, isAwaited)
-    const sourcesBase = mapUrl.startsWith('data:') ? chunkUrl : mapUrl
-    return new FlattenMap(text, sourcesBase)
+  function loadMap(chunkUrl: string, isAwaited: () => boolean): Promise<TraceMap | null> {
+    return limited(async () => {
+      if (!isAwaited()) throw new Error(`no resolve still waits for ${chunkUrl}`)
+      const js = await fetchText(chunkUrl)
+      const ref = lastSourceMappingUrl(js)
+      if (!ref) return null
+      const mapUrl = new URL(ref, chunkUrl).href
+      const text = await fetchText(mapUrl)
+      const sourcesBase = mapUrl.startsWith('data:') ? chunkUrl : mapUrl
+      return new FlattenMap(text, sourcesBase)
+    })
   }
 
   function startMapLoad(chunkUrl: string, deadline: AbortSignal): MapLoad {

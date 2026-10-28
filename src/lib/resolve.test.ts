@@ -219,6 +219,21 @@ describe('createResolver', () => {
       expect(healthy).toEqual({ file: '/Users/me/app/components/theme-toggle.tsx', line: 2, column: 1 })
     })
 
+    it('finishes a chunk and its map before starting the next chunk, so a slow dev server resolves some frames by the deadline', async () => {
+      vi.useFakeTimers()
+      const fetchMs = 1900
+      const fetcher: Fetcher = async url => {
+        await new Promise(r => setTimeout(r, fetchMs))
+        if (url.endsWith('.map')) return new Response(sectionedMap)
+        return new Response(chunk.replace('abc._.js.map', `${url.split('/').at(-1)}.map`))
+      }
+      const resolver = createResolver({ pageOrigin: ORIGIN, fetcher })
+      const pending = resolver.resolveAll(Array.from({ length: 10 }, (_, i) => frameOn(i)))
+      await vi.advanceTimersByTimeAsync(RESOLVE_DEADLINE_MS)
+      const resolved = (await pending).filter(loc => loc !== null)
+      expect(resolved).toHaveLength(2 * MAX_CONCURRENT_FETCHES)
+    })
+
     it('settles a whole resolveAll at the overall deadline and starts no queued fetch after it', async () => {
       vi.useFakeTimers()
       const calls: string[] = []
