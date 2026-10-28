@@ -177,3 +177,26 @@ test('text highlighted before a normal pin reaches Copy all', async () => {
   expect(await tab.evaluate(() => navigator.clipboard.readText())).toContain('Selected text: "Settings"')
   await tab.close()
 })
+
+test('hovering and clicking pick the button under a transparent full-screen backdrop', async () => {
+  const tab = await context.newPage()
+  await tab.bringToFront()
+  const tabOverlay = tab.locator('annotate-dom-root')
+  await tab.goto(`${fixtureUrl}/backdrop`)
+  await toggleOverlay()
+  await expect(tabOverlay.locator('.panel')).toBeVisible()
+
+  const box = await tab.locator('#go').boundingBox()
+  if (!box) throw new Error('button has no box')
+  const x = box.x + box.width / 2
+  const y = box.y + box.height / 2
+  await tab.mouse.move(x, y)
+  await expect(tabOverlay.locator('.hl-label')).toContainText('button#go')
+
+  await tab.mouse.click(x, y)
+  await expect(tabOverlay.locator('.editor textarea')).toBeVisible()
+  const editor = await tabOverlay.locator('.editor').boundingBox()
+  expect(editor?.y).toBeGreaterThanOrEqual(box.y + box.height)
+  await tab.keyboard.press('Escape')
+  await tab.close()
+})
