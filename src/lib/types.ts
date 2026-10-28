@@ -74,6 +74,8 @@ export type Accessibility = {
   readonly violations: readonly AxeViolation[]
 }
 
+export type CssVariable = { readonly name: string; readonly value: string }
+
 export type Sides = readonly [top: number, right: number, bottom: number, left: number]
 
 export type BoxModel = { readonly margin: Sides; readonly padding: Sides; readonly border: Sides }
@@ -104,6 +106,7 @@ export type Inspection = {
   readonly queries?: readonly QuerySnapshot[]
   readonly interaction?: Interaction
   readonly tokens?: DesignTokens
+  readonly cssVariables?: readonly CssVariable[]
   readonly locator?: string | null
   readonly a11y?: Accessibility
   readonly selectedText?: string

@@ -1,9 +1,17 @@
 // @vitest-environment happy-dom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+/// <reference types="node" />
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { chromium, type Browser } from '@playwright/test'
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { inspectElement, axeViolations } from './inspect'
+import type { CssVariable } from './lib/types'
 
 const runInPage: typeof inspectElement = new Function(`return ${inspectElement.toString()}`)()
 const runAxeInPage: typeof axeViolations = new Function(`return ${axeViolations.toString()}`)()
+
+function isStyleSheetList(value: unknown): value is StyleSheetList {
+  return Array.isArray(value) && typeof Reflect.get(value, 'item') === 'function'
+}
 
 function itemForm() {
   const setter = { lastRenderedReducer: () => null }
@@ -602,6 +610,267 @@ describe('inspectElement', () => {
       document.head.innerHTML = ''
       document.body.innerHTML = '<div class="a" data-annotate-dom-target="t4" style="padding: 16px">x</div>'
       expect(runInPage('t4')?.tokens).toEqual({ classes: ['a'], values: [{ prop: 'padding', value: '16px', token: null }] })
+    })
+  })
+
+  describe('css variables', () => {
+    function variablesOf(head: string, body: string, marker = 'v1') {
+      document.head.innerHTML = head
+      document.body.innerHTML = body
+      return runInPage(marker)?.cssVariables
+    }
+
+    beforeEach(() => {
+      const realComputedStyle = window.getComputedStyle.bind(window)
+      vi.spyOn(window, 'getComputedStyle').mockImplementation(node => {
+        const own = realComputedStyle(node)
+        return new Proxy(own, {
+          get(target, key) {
+            if (key !== 'getPropertyValue') return Reflect.get(target, key)
+            return (name: string) => {
+              for (let n: Element | null = node; n; n = n.parentElement) {
+                const value = realComputedStyle(n).getPropertyValue(name)
+                if (value !== '' || !name.startsWith('--')) return value
+              }
+              return ''
+            }
+          },
+        })
+      })
+    })
+
+    afterEach(() => {
+      vi.restoreAllMocks()
+      document.head.innerHTML = ''
+    })
+
+    it('lists a variable declared on the element by an inline style', () => {
+      expect(variablesOf('', '<div data-annotate-dom-target="v1" style="--accent: #f00">x</div>')).toEqual([{ name: '--accent', value: '#f00' }])
+    })
+
+    it('lists a variable declared on an ancestor, with the value the element resolves', () => {
+      const head = '<style>.theme { --primary: blue } .theme .inner { --primary: green }</style>'
+      const body = '<div class="theme"><section class="inner"><button data-annotate-dom-target="v1">x</button></section></div>'
+      expect(variablesOf(head, body)).toEqual([{ name: '--primary', value: 'green' }])
+    })
+
+    it('lists a variable declared by a rule on an ancestor other than the root', () => {
+      const head = '<style>.panel { --gap: 8px }</style>'
+      expect(variablesOf(head, '<section class="panel"><button data-annotate-dom-target="v1">x</button></section>')).toEqual([{ name: '--gap', value: '8px' }])
+    })
+
+    it('leaves out a variable declared only at the root unless something reads it', () => {
+      expect(variablesOf('<style>:root { --radius: 0.5rem } html { --unused: 1 }</style>', '<button data-annotate-dom-target="v1">x</button>')).toEqual([])
+    })
+
+    it('lists a root variable that a matching rule reads through var()', () => {
+      const head = '<style>:root { --space: 4px } .btn { padding: var(--space); color: var(--missing, red) }</style>'
+      const names = variablesOf(head, '<button class="btn" data-annotate-dom-target="v1">x</button>')?.map(v => v.name)
+      expect(names).toEqual(['--space'])
+    })
+
+    it('lists a variable that the element inline style reads through var()', () => {
+      const head = '<style>:root { --ink: navy }</style>'
+      const body = '<button data-annotate-dom-target="v1" style="color: var(--ink)">x</button>'
+      expect(variablesOf(head, body)).toEqual([{ name: '--ink', value: 'navy' }])
+    })
+
+    it('follows a variable whose value reads another variable', () => {
+      const head = '<style>:root { --base: 4px; --space: var(--base); --unrelated: 9px } .btn { padding: var(--space) }</style>'
+      const names = variablesOf(head, '<button class="btn" data-annotate-dom-target="v1">x</button>')?.map(v => v.name)
+      expect(names).toEqual(['--base', '--space'])
+    })
+
+    it('leaves out variables that only rules matching other elements declare or read', () => {
+      const head = '<style>.other { --nope: 1; color: var(--also-nope) } #elsewhere { --aside: 2 } :root { --kept: 3 }</style>'
+      const body = '<div id="elsewhere" class="other"></div><button data-annotate-dom-target="v1">x</button>'
+      expect(variablesOf(head, body)).toEqual([])
+    })
+
+    it('finds variables inside grouping rules such as @media', () => {
+      const head = '<style>@media screen { .card { --brand: #00f } }</style>'
+      expect(variablesOf(head, '<i class="card" data-annotate-dom-target="v1">x</i>')).toEqual([{ name: '--brand', value: '#00f' }])
+    })
+
+    it('ignores a rule whose selector the browser cannot evaluate', () => {
+      const matches = Element.prototype.matches
+      vi.spyOn(Element.prototype, 'matches').mockImplementation(function (this: Element, selector: string) {
+        if (selector === '.unsupported') throw new DOMException('not a valid selector', 'SyntaxError')
+        return matches.call(this, selector)
+      })
+      const head = '<style>.unsupported { --bad: 1 } .ok { --good: 2 }</style>'
+      expect(variablesOf(head, '<i class="ok unsupported" data-annotate-dom-target="v1">x</i>')?.map(v => v.name)).toEqual(['--good'])
+    })
+
+    it('puts the variables the element reads first, then the ones it declares, each sorted by name', () => {
+      const head = '<style>:root { --zeta: 1; --alpha: 2 } .box { --beta: 3; --aaa: 4; color: var(--zeta); margin: var(--alpha) }</style>'
+      expect(variablesOf(head, '<i class="box" data-annotate-dom-target="v1">x</i>')?.map(v => v.name)).toEqual(['--alpha', '--zeta', '--aaa', '--beta'])
+    })
+
+    it('drops a variable that a rule reads but nothing declares', () => {
+      const head = '<style>:root { --set: 1 } .btn { color: var(--never-declared); margin: var(--set) }</style>'
+      expect(variablesOf(head, '<i class="btn" data-annotate-dom-target="v1">x</i>')?.map(v => v.name)).toEqual(['--set'])
+    })
+
+    it('keeps the variables a Tailwind-like sheet reads among 200 root variables', () => {
+      const root = Array.from({ length: 200 }, (_, i) => `--color-${String(i).padStart(3, '0')}: ${i}`).join('; ')
+      const head = `<style>:root { ${root}; --primary: oklch(0.2 0 0); --radius: 0.5rem } .btn { background: var(--primary); border-radius: var(--radius) }</style>`
+      const found = variablesOf(head, '<button class="btn" data-annotate-dom-target="v1">x</button>')
+      expect(found).toEqual([
+        { name: '--primary', value: 'oklch(0.2 0 0)' },
+        { name: '--radius', value: '0.5rem' },
+      ])
+    })
+
+    it('caps the list at 30 after the variables the element reads', () => {
+      const declared = Array.from({ length: 40 }, (_, i) => `--v${String(i).padStart(2, '0')}: ${i + 1}`).join('; ')
+      const head = `<style>.box { ${declared}; color: var(--read) } :root { --read: red }</style>`
+      const found = variablesOf(head, '<i class="box" data-annotate-dom-target="v1">x</i>')
+      expect(found).toHaveLength(30)
+      expect(found?.[0]).toEqual({ name: '--read', value: 'red' })
+      expect(found?.[1]).toEqual({ name: '--v00', value: '1' })
+      expect(found?.[29]).toEqual({ name: '--v28', value: '29' })
+    })
+
+    it('skips --tw- variables so they never fill the cap, and keeps the app and theme tokens', () => {
+      const internals = Array.from({ length: 40 }, (_, i) => `--tw-shadow-${String(i).padStart(2, '0')}: ${i}`).join('; ')
+      const head = `<style>.btn { ${internals}; --zeta-ring: 1px; --twin: 2px; color: var(--tw-text-opacity); margin: var(--zeta-gap) } :root { --tw-text-opacity: 1; --zeta-gap: 4px }</style>`
+      const found = variablesOf(head, '<button class="btn" data-annotate-dom-target="v1">x</button>')
+      expect(found).toEqual([
+        { name: '--zeta-gap', value: '4px' },
+        { name: '--twin', value: '2px' },
+        { name: '--zeta-ring', value: '1px' },
+      ])
+    })
+
+    it('prints a secret-named variable as [redacted] and keeps the others', () => {
+      const head = '<style>.box { --api-key: sk-live-1; --userPin: 1234; --shipping-gap: 4px; --auth-token: abc }</style>'
+      expect(variablesOf(head, '<i class="box" data-annotate-dom-target="v1">x</i>')).toEqual([
+        { name: '--api-key', value: '[redacted]' },
+        { name: '--auth-token', value: '[redacted]' },
+        { name: '--shipping-gap', value: '4px' },
+        { name: '--userPin', value: '[redacted]' },
+      ])
+    })
+
+    it('prints a variable as [redacted] when its value reads a secret-named variable, directly or through another alias', () => {
+      const head = '<style>:root { --api-key: sk-live-1; --mid: var(--api-key); --plain: 4px } .box { --accent: var(--mid); --safe: var(--plain); color: var(--accent); margin: var(--safe) }</style>'
+      expect(variablesOf(head, '<i class="box" data-annotate-dom-target="v1">x</i>')).toEqual([
+        { name: '--accent', value: '[redacted]' },
+        { name: '--api-key', value: '[redacted]' },
+        { name: '--mid', value: '[redacted]' },
+        { name: '--plain', value: '4px' },
+        { name: '--safe', value: '4px' },
+      ])
+    })
+
+    it('stops on a reference cycle between rules that do not all apply to the element', () => {
+      const head = '<style>:root { --y: 1px } .box { --x: var(--y); margin: var(--x) } .other { --y: var(--x) }</style>'
+      expect(variablesOf(head, '<i class="box" data-annotate-dom-target="v1">x</i>')).toEqual([
+        { name: '--x', value: '1px' },
+        { name: '--y', value: '1px' },
+      ])
+    })
+
+    it('is empty when the page declares no variables', () => {
+      expect(variablesOf('<style>.a { color: red }</style>', '<i class="a" data-annotate-dom-target="v1">x</i>')).toEqual([])
+    })
+
+    it('skips a stylesheet it cannot read and still lists the rest', () => {
+      document.head.innerHTML = '<style>.box { --ok: 1 }</style>'
+      const crossOrigin = {
+        get cssRules(): CSSRuleList {
+          throw new DOMException('Cannot access rules', 'SecurityError')
+        },
+      }
+      const sheets = Object.assign([crossOrigin, ...Array.from(document.styleSheets)], { item: () => null })
+      if (!isStyleSheetList(sheets)) throw new Error('fixture is not a style sheet list')
+      vi.spyOn(document, 'styleSheets', 'get').mockReturnValue(sheets)
+      document.body.innerHTML = '<i class="box" data-annotate-dom-target="v1">x</i>'
+      expect(runInPage('v1')?.cssVariables).toEqual([{ name: '--ok', value: '1' }])
+    })
+
+    describe('redaction by resolved value in Chromium', () => {
+      const tokens = {
+        imported: ':root { --api-key: sk-live-imported; --color: var(--api-key) }',
+        crossOrigin: ':root { --auth-token: sk-live-crossorigin; --brand: var(--auth-token) }',
+      }
+      const pages: Record<string, string> = {
+        '/html-style': '<!doctype html><html style="--api-key: sk-live-htmlstyle; --c: var(--api-key)"><head><style>.box { color: var(--c) }</style></head><body><i class="box" data-annotate-dom-target="v1">x</i></body></html>',
+        '/import': '<!doctype html><html><head><style>@import url("/imported.css"); .box { color: var(--color) }</style></head><body><i class="box" data-annotate-dom-target="v1">x</i></body></html>',
+        '/override': '<!doctype html><html><head><style>:root { --api-key: sk-live-rootvalue; --color: var(--api-key) } .box { --api-key: overridden; color: var(--color) }</style></head><body><i class="box" data-annotate-dom-target="v1">x</i></body></html>',
+        '/compound': '<!doctype html><html><head><style>:root { --api-key: sk-live-compound } .box { --shadow: 0 0 2px var(--api-key); box-shadow: var(--shadow) }</style></head><body><i class="box" data-annotate-dom-target="v1">x</i></body></html>',
+        '/short-equal': '<!doctype html><html><head><style>.box { --keyframe-delay: 0s; --radius: 0s; --api-key: sk-live-equal; --same: sk-live-equal; padding: var(--radius); color: var(--same) }</style></head><body><i class="box" data-annotate-dom-target="v1">x</i></body></html>',
+        '/short': '<!doctype html><html><head><style>.box { --pin-size: 4px; --gap: 14px; padding: var(--gap) }</style></head><body><i class="box" data-annotate-dom-target="v1">x</i></body></html>',
+      }
+      const respond = (routes: Record<string, string>) => (req: IncomingMessage, res: ServerResponse) => {
+        const body = routes[req.url ?? '']
+        res.writeHead(body === undefined ? 404 : 200, { 'content-type': req.url?.endsWith('.css') ? 'text/css' : 'text/html' })
+        res.end(body)
+      }
+      const listen = (server: Server): Promise<number> => new Promise(resolve => server.listen(0, '127.0.0.1', () => {
+        const address = server.address()
+        resolve(typeof address === 'object' && address ? address.port : 0)
+      }))
+
+      let pageServer: Server
+      let tokenServer: Server
+      let pageOrigin = ''
+      let browser: Browser
+
+      beforeAll(async () => {
+        tokenServer = createServer(respond({ '/crossorigin.css': tokens.crossOrigin }))
+        const tokenPort = await listen(tokenServer)
+        pageServer = createServer(respond({
+          ...pages,
+          '/imported.css': tokens.imported,
+          '/cross-origin': `<!doctype html><html><head><link rel="stylesheet" href="http://127.0.0.1:${tokenPort}/crossorigin.css"><style>.box { color: var(--brand) }</style></head><body><i class="box" data-annotate-dom-target="v1">x</i></body></html>`,
+        }))
+        pageOrigin = `http://127.0.0.1:${await listen(pageServer)}`
+        browser = await chromium.launch()
+      })
+
+      afterAll(async () => {
+        await browser.close()
+        pageServer.close()
+        tokenServer.close()
+      })
+
+      async function chromiumVariables(path: string): Promise<CssVariable[] | undefined> {
+        const page = await browser.newPage()
+        try {
+          await page.goto(pageOrigin + path)
+          return await page.evaluate(({ run }) => new Function(`return ${run}`)()('v1')?.cssVariables, { run: inspectElement.toString() })
+        } finally {
+          await page.close()
+        }
+      }
+
+      it.each([
+        ['an alias declared on <html style>', '/html-style', '--c'],
+        ['an alias in an @imported sheet', '/import', '--color'],
+        ['an alias in a cross-origin sheet', '/cross-origin', '--brand'],
+        ['an alias whose secret a descendant overrides', '/override', '--color'],
+        ['a compound value that contains the secret', '/compound', '--shadow'],
+      ])('redacts %s', async (_label, path, alias) => {
+        const variables = await chromiumVariables(path)
+        expect(variables?.find(v => v.name === alias)).toEqual({ name: alias, value: '[redacted]' })
+        expect(JSON.stringify(variables)).not.toContain('sk-live')
+      }, 30_000)
+
+      it('keeps a short value equal to a short secret value and redacts a long one equal to a secret', async () => {
+        const variables = await chromiumVariables('/short-equal')
+        expect(variables?.find(v => v.name === '--radius')).toEqual({ name: '--radius', value: '0s' })
+        expect(variables?.find(v => v.name === '--same')).toEqual({ name: '--same', value: '[redacted]' })
+        expect(JSON.stringify(variables)).not.toContain('sk-live')
+      }, 30_000)
+
+      it('does not redact a short value that only appears inside another value', async () => {
+        expect(await chromiumVariables('/short')).toEqual([
+          { name: '--gap', value: '14px' },
+          { name: '--pin-size', value: '[redacted]' },
+        ])
+      }, 30_000)
     })
   })
 

@@ -112,6 +112,7 @@ function pinSection({ pin, cropFile, excerpts = [] }: ExportPin, n: number): str
   if (ins.tokens?.values.length) {
     lines.push(`- Tokens: ${ins.tokens.values.map(v => `${v.prop}: ${v.value} ${v.token ? `= ${v.token}` : '(no token)'}`).join('; ')}`)
   }
+  if (ins.cssVariables?.length) lines.push(`- CSS variables: ${ins.cssVariables.map(v => `${v.name}: ${v.value}`).join('; ')}`)
   if (ins.a11y) {
     const { role, name, states, violations } = ins.a11y
     const facts = [role ? `role ${code(role)}` : 'no role', name ? `name ${code(name)}` : 'no name']
