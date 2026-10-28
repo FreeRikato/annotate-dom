@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { type ExportPage, toMarkdown } from './markdown'
-import type { DetailLevel, Inspection, Pin } from './types'
+import { type AlsoTarget, type DetailLevel, type Inspection, type Pin, unionBox } from './types'
 
 function firstPage({ pages }: { readonly pages: readonly ExportPage[] }): ExportPage {
   const [page] = pages
@@ -570,5 +570,56 @@ describe('toMarkdown box model and default styles', () => {
     const BEFORE = 1591
     console.log(`single-pin standard export length: before ${BEFORE}, after ${md.length}`)
     expect(md.length).toBeLessThanOrEqual(BEFORE)
+  })
+})
+
+describe('multi-element pins', () => {
+  const also: readonly AlsoTarget[] = [
+    { selector: 'form > button.cancel', locator: null, elementSite: { file: '/app/components/item-form.tsx', line: 91, column: 7 }, box: { x: 700, y: 640, w: 90, h: 36 } },
+    { selector: 'form > a.help', locator: null, elementSite: null, box: { x: 600, y: 640, w: 60, h: 36 } },
+  ]
+  const render = (level: DetailLevel, withAlso: boolean) => toMarkdown({
+    origin: 'http://localhost:3000',
+    createdAt: 0,
+    level,
+    pages: [{
+      path: '/settings', url: 'http://localhost:3000/settings', viewportFile: null,
+      pins: [{ pin: { ...pin('a', '/settings', 'align these'), ...(withAlso ? { also } : {}) }, cropFile: null }],
+    }],
+  })
+
+  it.each(['standard', 'forensic'] as const)('lists the other elements under Also at %s', level => {
+    expect(render(level, true)).toContain([
+      '- Also:',
+      '  - `form > button.cancel` at /app/components/item-form.tsx:91, box 700 640 90 36',
+      '  - `form > a.help`, box 600 640 60 36',
+    ].join('\n'))
+  })
+
+  it('appends the count of other elements to the compact line and prints no list', () => {
+    const md = render('compact', true)
+    expect(md).toContain('1. **form > button[type="submit"]** (/app/components/ui/button.tsx:58): align these (+2 more)')
+    expect(md).not.toContain('Also')
+  })
+
+  it.each(['compact', 'standard', 'forensic'] as const)('exports a single-element pin byte for byte as before at %s', level => {
+    const plain = render(level, false)
+    expect(plain).not.toContain('Also')
+    expect(plain).not.toContain('more)')
+    expect(toMarkdown({
+      origin: 'http://localhost:3000', createdAt: 0, level,
+      pages: [{ path: '/settings', url: 'http://localhost:3000/settings', viewportFile: null, pins: [{ pin: { ...pin('a', '/settings', 'align these'), also: [] }, cropFile: null }] }],
+    })).toBe(plain)
+  })
+})
+
+describe('unionBox', () => {
+  it('spans every box, so the padded crop covers all of them', () => {
+    expect(unionBox([{ x: 10, y: 20, w: 30, h: 10 }, { x: 100, y: 5, w: 20, h: 40 }, { x: 50, y: 60, w: 5, h: 5 }]))
+      .toEqual({ x: 10, y: 5, w: 110, h: 60 })
+  })
+
+  it('is the box itself for one element', () => {
+    expect(unionBox([{ x: 3, y: 4, w: 5, h: 6 }])).toEqual({ x: 3, y: 4, w: 5, h: 6 })
   })
 })

@@ -27,10 +27,21 @@ function isWirePage(value: unknown): value is WireBatch['pages'][number] {
     && (value.viewport === null || typeof value.viewport === 'string')
 }
 
+function isBox(value: unknown): boolean {
+  return isRecord(value) && ['x', 'y', 'w', 'h'].every(key => typeof value[key] === 'number')
+}
+
+function isAlsoTarget(value: unknown): boolean {
+  return isRecord(value) && typeof value.selector === 'string' && isBox(value.box)
+    && (value.locator === null || typeof value.locator === 'string')
+    && (value.elementSite === null || isRecord(value.elementSite))
+}
+
 function isWirePin(value: unknown): value is WireBatch['pins'][number] {
   return isRecord(value) && typeof value.n === 'number' && typeof value.url === 'string'
     && typeof value.path === 'string' && typeof value.note === 'string' && typeof value.crop === 'string'
     && isRecord(value.inspection) && Array.isArray(value.callSites)
+    && (value.also === undefined || (Array.isArray(value.also) && value.also.every(isAlsoTarget)))
 }
 
 function parseJson(text: string): unknown {
